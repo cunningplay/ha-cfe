@@ -1,0 +1,80 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Recibos de CFE por correo",
+        "description": "Conecta el buzón que recibe los recibos de CFE (los adjuntos XML del CFDI). En Gmail, usa una contraseña de aplicación.",
+        "data": {
+          "host": "Servidor IMAP",
+          "port": "Puerto",
+          "username": "Correo electrónico",
+          "password": "Contraseña de aplicación",
+          "folder": "Carpeta",
+          "rpu": "Número de servicio (RPU)"
+        },
+        "data_description": {
+          "host": "imap.gmail.com para Gmail.",
+          "port": "993 (IMAP con SSL).",
+          "password": "Una contraseña de aplicación de Gmail, no la contraseña de la cuenta.",
+          "folder": "Carpeta del buzón donde llegan los recibos, p. ej. INBOX.",
+          "rpu": "El RPU de 12 dígitos impreso en el recibo."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Falló el inicio de sesión del correo",
+        "description": "El buzón rechazó el inicio de sesión de {username}. Escribe una nueva contraseña de aplicación.",
+        "data": {
+          "password": "Contraseña de aplicación"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "No se pudo conectar al servidor IMAP ni abrir la carpeta.",
+      "invalid_auth": "El buzón rechazó el correo o la contraseña de aplicación.",
+      "invalid_rpu": "El RPU debe tener exactamente 12 dígitos."
+    },
+    "abort": {
+      "already_configured": "Este número de servicio (RPU) ya está configurado.",
+      "reauth_successful": "La nueva contraseña de aplicación funciona."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Consulta",
+        "data": {
+          "scan_interval": "Revisar el correo cada (horas)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "amount_due": { "name": "Total a pagar" },
+      "due_date": { "name": "Fecha límite de pago" },
+      "cutoff_date": { "name": "Fecha de corte" },
+      "period_start": { "name": "Inicio del periodo" },
+      "period_end": { "name": "Fin del periodo" },
+      "bill_date": { "name": "Fecha del recibo" },
+      "energy": { "name": "Consumo" },
+      "daily_energy": { "name": "Consumo diario" },
+      "daily_cost": { "name": "Costo diario" },
+      "meter_reading": { "name": "Lectura del medidor" },
+      "tariff": { "name": "Tarifa" },
+      "subsidy": { "name": "Aportación gubernamental" },
+      "real_cost": { "name": "Costo real de la energía" }
+    },
+    "binary_sensor": {
+      "paid": { "name": "Pagado" }
+    },
+    "button": {
+      "mark_paid": { "name": "Marcar como pagado" }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Actualizar",
+      "description": "Revisa ahora el correo en busca de nuevos recibos de CFE."
+    }
+  }
+}

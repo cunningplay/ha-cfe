@@ -1,0 +1,80 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "CFE bills from email",
+        "description": "Connect the mailbox that receives the CFE bills (the CFDI XML attachments). For Gmail, use an app password.",
+        "data": {
+          "host": "IMAP server",
+          "port": "Port",
+          "username": "Email address",
+          "password": "App password",
+          "folder": "Folder",
+          "rpu": "Service number (RPU)"
+        },
+        "data_description": {
+          "host": "imap.gmail.com for Gmail.",
+          "port": "993 (IMAP over SSL).",
+          "password": "A Gmail app password, not your account password.",
+          "folder": "Mailbox folder that receives the bills, e.g. INBOX.",
+          "rpu": "The 12-digit RPU printed on the bill."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Mailbox login failed",
+        "description": "The mailbox rejected the login for {username}. Enter a new app password.",
+        "data": {
+          "password": "App password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to the IMAP server or open the folder.",
+      "invalid_auth": "The mailbox rejected the email address or app password.",
+      "invalid_rpu": "The RPU must be exactly 12 digits."
+    },
+    "abort": {
+      "already_configured": "This service number (RPU) is already set up.",
+      "reauth_successful": "The new app password works."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling",
+        "data": {
+          "scan_interval": "Check the mailbox every (hours)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "amount_due": { "name": "Amount due" },
+      "due_date": { "name": "Due date" },
+      "cutoff_date": { "name": "Cut-off date" },
+      "period_start": { "name": "Period start" },
+      "period_end": { "name": "Period end" },
+      "bill_date": { "name": "Bill date" },
+      "energy": { "name": "Energy" },
+      "daily_energy": { "name": "Daily energy" },
+      "daily_cost": { "name": "Daily cost" },
+      "meter_reading": { "name": "Meter reading" },
+      "tariff": { "name": "Tariff" },
+      "subsidy": { "name": "Government subsidy" },
+      "real_cost": { "name": "Real energy cost" }
+    },
+    "binary_sensor": {
+      "paid": { "name": "Paid" }
+    },
+    "button": {
+      "mark_paid": { "name": "Mark paid" }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Refresh",
+      "description": "Checks the mailbox for new CFE bills now."
+    }
+  }
+}
