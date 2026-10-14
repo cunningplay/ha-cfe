@@ -1,0 +1,6 @@
+# Real CFE bills (name, address, service number): never committed
+samples/
+__pycache__/
+.venv/
+.pytest_cache/
+.DS_Store
