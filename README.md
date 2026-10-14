@@ -1,4 +1,302 @@
+# Recibos CFE para Home Assistant
+
+**Español** · [English](#cfe-bills-for-home-assistant)
+
+Una integración personalizada que lee los recibos de la CFE (Comisión Federal
+de Electricidad) desde tu correo. La CFE no tiene una API que se pueda usar,
+pero cada recibo llega por correo con su XML CFDI 4.0, su PDF o ambos. Esta
+integración lee el buzón (iniciando sesión con Google mediante la API de Gmail,
+o con cualquier servidor de correo por IMAP), interpreta el XML (o el PDF
+cuando no hay XML) y convierte el recibo más reciente en sensores. Además
+guarda los kWh y el costo de cada recibo en las estadísticas a largo plazo.
+
+- Solo se usan los recibos cuyo emisor es la CFE (RFC `CFE370814QI0`) y cuyo
+  RPU coincide con el número de servicio configurado. El remitente no importa,
+  así que también funcionan los recibos que alguien más te reenvía.
+- Cada recibo se guarda localmente (por folio). Si no se puede acceder al
+  buzón, los sensores siguen mostrando los datos guardados.
+- No hace falta entrar al sitio de la CFE ni resolver captchas. El lector de
+  PDF necesita dos paquetes de Python puro, `pypdf` y `fonttools` (Home
+  Assistant los instala).
+
+## Recibos en XML y en PDF
+
+El XML del CFDI es la fuente preferida: trae todos los datos. Los recibos
+digitales de la CFE pueden llegar solo con el PDF, así que la integración
+también lee los adjuntos `.pdf`:
+
+- **Ambos en el mismo mensaje**: se usa el XML y se ignora el PDF (con el
+  inicio de sesión de Google ni siquiera se descarga).
+- **Primero el PDF, después el XML** (en otro mensaje, mismo folio): el recibo
+  del XML reemplaza al del PDF. Se conserva la marca de pagado.
+- **Primero el XML, después el PDF**: el PDF se ignora. Un PDF nunca reemplaza
+  a un recibo XML.
+- Un PDF que no es un recibo de la CFE, o que es de otro número de servicio, se
+  ignora. Un PDF ilegible o cifrado se omite con una advertencia; el mensaje
+  cuenta como leído de todos modos.
+
+Los PDF de la CFE tienen la capa de texto dañada (los mapas de caracteres de
+las fuentes incrustadas no corresponden a los glifos), por eso al copiar y
+pegar sale texto sin sentido. La integración reconoce cada glifo por su
+contorno (incluye una tabla de hashes de contornos de Arial en `glyphs.json`,
+sin datos de la fuente), reconstruye los mapas de caracteres y lee el texto.
+No usa OCR ni dibuja nada. Si un glifo no se reconoce, el dato al que
+pertenece se queda vacío en lugar de quedar mal. Un PDF solo se toma como
+recibo si menciona a la CFE, tiene al menos dos de las etiquetas *PERIODO
+FACTURADO*, *TOTAL A PAGAR* y *LÍMITE DE PAGO* (para que un comprobante de pago
+no cuente como recibo), sus cargos suman el total y su lectura del medidor
+coincide con los kWh; si no, se omite con una advertencia.
+
+Un recibo leído del PDF tiene el mismo importe, fechas, periodo, kWh, tarifa,
+lectura del medidor, conceptos, referencia de pago y folio que el XML. Los
+escalones de consumo son distintos: el PDF imprime kWh enteros por escalón y
+el subtotal de cada uno (el `subtotal` en el atributo de escalones del sensor
+*Consumo*), mientras que el XML trae kWh con decimales y sin subtotal. No
+tiene fecha de emisión (*Fecha del recibo* queda como desconocida), ni
+historial de consumo, costo diario, costo real de la energía ni temporada de
+verano. El atributo `source` del sensor *Total a pagar* indica de dónde salió
+el recibo (`xml` o `pdf`).
+
+*Aportación gubernamental* queda vacía en un recibo leído del PDF: el
+"Apoyo Gubernamental" que viene impreso en el PDF es una cifra distinta a la
+`AportacionGub` del XML (75.29 contra 265.29 en el mismo recibo). El importe
+impreso queda en el atributo `apoyo_impreso` de *Total a pagar*.
+
+Consejo: en Gmail, un filtro con `from:cfe.mx has:attachment` puede ponerles
+una etiqueta a los recibos (y, con IMAP, esa etiqueta puede ser la carpeta que
+se lee).
+
+## Instalación (HACS)
+
+1. HACS → Integraciones → ⋮ → Repositorios personalizados (*Custom
+   repositories*) → agrega este repositorio como *Integración*
+   (*Integration*).
+2. Instala **CFE** y luego reinicia Home Assistant.
+3. Ajustes → Dispositivos y servicios → Añadir integración (*Settings →
+   Devices & services → Add integration*) → **CFE**.
+
+Instalación manual: copia `custom_components/cfe` en tu carpeta
+`config/custom_components/`.
+
+Requiere Home Assistant 2026.10 o más reciente.
+
+## Configuración
+
+Ajustes → Dispositivos y servicios → Añadir integración → **CFE**, y luego
+elige cómo se van a leer los recibos:
+
+- **Cuenta de Google (iniciar sesión)**: inicias sesión con Google; no
+  necesitas contraseña de aplicación ni verificación en 2 pasos. Requiere
+  crear una sola vez un cliente OAuth (ver abajo).
+- **Servidor de correo (IMAP)**: cualquier buzón, con una contraseña de
+  aplicación de Gmail o el usuario y contraseña IMAP de tu proveedor.
+
+En los dos casos después escribes el RPU (el número de servicio de 12 dígitos
+impreso en el recibo, "No. de servicio"). Los espacios se quitan. Se crea una
+entrada de configuración (y un dispositivo) por cada RPU. Los dos métodos
+alimentan los mismos sensores, la misma marca de pagado y las mismas
+estadísticas.
+
+### Inicio de sesión con la cuenta de Google
+
+Home Assistant inicia sesión con tu propio cliente OAuth de Google
+(credenciales de aplicación). Esto se configura una sola vez en Google Cloud
+Console:
+
+1. Abre <https://console.cloud.google.com/> y crea un proyecto (o elige uno).
+2. Habilita la **API de Gmail** (*Gmail API*) en ese proyecto:
+   <https://console.cloud.google.com/apis/library/gmail.googleapis.com>.
+   Sin ella todas las solicitudes fallan.
+3. Configura la **pantalla de consentimiento de OAuth** (*OAuth consent
+   screen*; en Google Auth Platform → Desarrollo de la marca / Público,
+   *Branding / Audience*): tipo de usuario *Externo* (*External*), tu correo
+   como correo de asistencia y como contacto del desarrollador. En *Público*
+   (*Audience*), **publica la app** (*En producción*, *In production*). Las
+   apps que se quedan en *Prueba* (*Testing*) reciben tokens de actualización
+   que vencen a los 7 días, y la integración te pediría volver a iniciar
+   sesión cada semana.
+4. **Credenciales → Crear credenciales → ID de cliente de OAuth → Aplicación
+   web** (*Credentials → Create credentials → OAuth client ID → Web
+   application*). Agrega el URI de redireccionamiento autorizado
+   `https://my.home-assistant.io/redirect/oauth`. Copia el ID de cliente y el
+   secreto.
+5. En Home Assistant, elige **Cuenta de Google (iniciar sesión)**. La primera
+   vez te pide el ID de cliente y el secreto (también puedes ir a Ajustes →
+   Dispositivos y servicios → ⋮ → Credenciales de la aplicación, *Application
+   credentials*). Luego inicia sesión con la cuenta de Google que recibe los
+   recibos y permite el acceso de solo lectura a Gmail.
+6. Google avisa que la app no está verificada ("Google no verificó esta app",
+   *Google hasn't verified this app*). Es normal con un cliente OAuth
+   personal: tú eres el desarrollador y también el usuario. Elige
+   **Configuración avanzada → Ir a … (no seguro)** (*Advanced → Go to …
+   (unsafe)*) para continuar.
+7. Escribe el RPU.
+
+La integración pide exactamente un permiso (*scope*),
+`https://www.googleapis.com/auth/gmail.readonly`. Busca mensajes con un
+adjunto `.xml` o `.pdf`
+(`has:attachment (filename:xml OR filename:pdf)`, en todas las carpetas menos
+spam y papelera) y descarga solo esos adjuntos. Cada mensaje se lee una sola
+vez (se recuerda su id). En cada consulta se leen como máximo 50 mensajes
+nuevos; si hay más esperando (por ejemplo, un buzón con años de recibos), la
+siguiente consulta se hace un minuto después, hasta leerlos todos. La
+dirección de correo de la cuenta se guarda con la entrada y aparece en su
+título.
+
+Si más adelante Google rechaza el token o la autorización (se revocó el
+acceso, venció el token de actualización, se quitó el acceso a Gmail), Home
+Assistant te pide volver a iniciar sesión con Google (reautenticación), con la
+misma cuenta de Google. Mientras tanto, los recibos guardados siguen
+visibles.
+
+Si el registro dice **the Gmail API must be enabled in the Google Cloud
+project** (hay que habilitar la API de Gmail en el proyecto de Google Cloud),
+habilítala (paso 2) en el proyecto al que pertenece el cliente OAuth; no hace
+falta volver a iniciar sesión.
+
+### Servidor de correo (IMAP)
+
+#### 1. Contraseña de aplicación de Gmail
+
+1. Activa la verificación en 2 pasos en la cuenta de Google que recibe los
+   recibos.
+2. Abre <https://myaccount.google.com/apppasswords>, crea una contraseña de
+   aplicación (ponle un nombre, por ejemplo "Home Assistant CFE") y copia los
+   16 caracteres.
+3. En Gmail, IMAP está activado de forma predeterminada. Si lo desactivaste,
+   actívalo en Gmail → Configuración → Reenvío y correo POP/IMAP (*Settings →
+   Forwarding and POP/IMAP*).
+
+También funcionan otros proveedores: usa su servidor IMAP y el puerto 993
+(SSL).
+
+#### 2. Carpeta
+
+`INBOX` de forma predeterminada. Si un filtro mueve los recibos a una
+etiqueta, escribe el nombre de la etiqueta (en IMAP las etiquetas de Gmail son
+carpetas, por ejemplo `CFE`). La carpeta se abre en modo de solo lectura; los
+mensajes nunca se mueven, se borran ni se marcan como leídos.
+
+#### 3. RPU
+
+El número de servicio de 12 dígitos impreso en el recibo ("No. de
+servicio"/RPU). Los espacios se quitan.
+
+| Campo | Valor predeterminado |
+|---|---|
+| Servidor IMAP | `imap.gmail.com` |
+| Puerto | `993` |
+| Correo electrónico | el buzón que recibe los recibos |
+| Contraseña de aplicación | la contraseña de aplicación del paso 1 |
+| Carpeta | `INBOX` |
+| Número de servicio (RPU) | 12 dígitos |
+
+## Entidades
+
+Un dispositivo, `CFE <RPU>`, con:
+
+| Entidad | Descripción |
+|---|---|
+| Total a pagar | Total a pagar (MXN). Atributos: folio, origen (`source`: `xml`/`pdf`), apoyo impreso (`apoyo_impreso`, recibos en PDF), referencia de pago, total de la factura, conceptos |
+| Fecha límite de pago | Fecha límite para pagar (`FECLIMITE`) |
+| Fecha de corte | Fecha a partir de la cual pueden cortar el servicio (`FECORTE`) |
+| Inicio / Fin del periodo | Periodo de facturación |
+| Fecha del recibo | Fecha en que se emitió la factura |
+| Consumo | kWh del periodo. Atributos: días, escalones, historial |
+| Consumo diario | Promedio de kWh por día (kWh/d) |
+| Costo diario | Costo promedio por día (MXN) |
+| Lectura del medidor | Lectura actual del medidor (siempre creciente). Atributos: número de medidor, lectura anterior |
+| Tarifa | Por ejemplo `1A`. Atributos: meses de la temporada de verano |
+| Aportación gubernamental | `AportacionGub` (MXN; vacía en un recibo leído del PDF) |
+| Costo real de la energía | Costo sin subsidio (MXN) |
+| Pagado (sensor binario) | Marca local de pagado del recibo más reciente |
+| Marcar como pagado (botón) | Marca el recibo más reciente como pagado |
+
+Los nombres de las entidades aparecen en el idioma de Home Assistant; esta
+tabla usa los nombres en español.
+
+La marca de pagado es local: los correos de la CFE no traen información de
+pago. En la primera importación, los recibos cuya fecha de corte (o, si no
+la tienen, la fecha límite de pago o el fin del periodo) ya pasó se marcan
+como pagados (en un servicio nuevo, un recibo sin pagar después de su fecha de
+corte significaría que ya te habrían cortado la luz). Los recibos posteriores
+nunca se marcan solos.
+
+## Estadísticas a largo plazo
+
+Cada recibo agrega un punto, en la fecha de fin de su periodo, a dos
+estadísticas externas:
+
+- `cfe:<rpu>_energy` (kWh): la energía facturada en el periodo (`CONSUMO_R`).
+- `cfe:<rpu>_cost` (MXN): el cargo del periodo, es decir, el `Total` de la
+  factura CFDI (energía + IVA + DAP). No es el total a pagar, que puede
+  incluir cargos únicos como el depósito de un servicio nuevo. En un recibo
+  leído del PDF es "Fac. del Periodo" + DSAP, que da el mismo importe.
+
+Las dos llevan una suma acumulada, así que se pueden usar en el panel de
+Energía o en una gráfica de estadísticas. Un punto en cero al inicio del
+periodo del primer recibo le da una base a ese primer recibo. Si dos recibos
+tienen la misma fecha de fin de periodo, cuenta el emitido más recientemente.
+
+## Consulta y actualización
+
+El buzón se revisa una vez al día (puedes cambiarlo en **Configurar** de la
+integración). Llama a `cfe.refresh` para revisarlo en ese momento; falla con
+un error si la revisión falló antes de leer algún mensaje. Si falla a la
+mitad, los mensajes leídos hasta ese momento se conservan (se registra una
+advertencia) y el resto se lee en la siguiente consulta.
+
+- IMAP: solo se descargan los mensajes más nuevos que el último UID visto (se
+  lleva el control del UIDVALIDITY de la carpeta); en Gmail la búsqueda se
+  limita a mensajes con un adjunto `.xml` o `.pdf`. Si el servidor rechaza el
+  inicio de sesión, Home Assistant te pide una nueva contraseña de aplicación
+  (reautenticación).
+- Google: la API de Gmail lista los mensajes con un adjunto `.xml` o `.pdf`;
+  los mensajes ya leídos se saltan, y un mensaje que Gmail ya no puede
+  entregar (borrado, 400/404) se registra y se salta. Home Assistant te pide
+  volver a iniciar sesión solo cuando Google rechaza el token (se niega la
+  actualización, HTTP 401) o la autorización (HTTP 403 por falta de
+  permisos). Los errores de cuota y de límite de solicitudes, los errores del
+  servidor y un servidor de tokens caído se reintentan en la siguiente
+  consulta. Si la API de Gmail está deshabilitada, se registra como error
+  ("the Gmail API must be enabled in the Google Cloud project") y también se
+  reintenta.
+
+Cualquier otro error de correo se reintenta en la siguiente consulta, y
+mientras tanto los datos guardados siguen visibles.
+
+## Privacidad
+
+- El inicio de sesión con Google usa el permiso de Gmail de solo lectura
+  (`gmail.readonly`): la integración puede leer el correo, pero no puede
+  enviarlo, cambiarlo ni borrarlo, y nunca ve tu contraseña de Google. Home
+  Assistant guarda el token OAuth en la entrada de configuración. Puedes
+  revocar el acceso cuando quieras en
+  <https://myaccount.google.com/permissions>.
+- Una contraseña de aplicación de Gmail da acceso completo a ese buzón. Usa un
+  buzón dedicado a los recibos (o reenvíalos a uno), no tu cuenta personal.
+- Con cualquiera de los dos métodos, los mensajes nunca se modifican, se
+  mueven ni se borran.
+- Los recibos interpretados (del XML o del PDF) se guardan en
+  `.storage/cfe.<entry_id>` dentro de la carpeta de configuración de Home
+  Assistant. El archivo se borra cuando eliminas la entrada de la
+  integración.
+- La contraseña nunca se escribe en el registro.
+
+## Desarrollo
+
+Las instrucciones para desarrolladores están en inglés: consulta la sección
+[Development](#development).
+
+## Licencia
+
+MIT
+
+---
+
 # CFE bills for Home Assistant
+
+[Español](#recibos-cfe-para-home-assistant) · **English**
 
 A custom integration that reads CFE (Comisión Federal de Electricidad, Mexico)
 bills from email. CFE has no usable API, but every bill arrives by email with
