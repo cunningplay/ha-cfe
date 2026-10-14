@@ -21,8 +21,8 @@ The CFDI XML is the preferred source: it carries every field. Paperless CFE
 bills may arrive with only the PDF, so the integration also reads `.pdf`
 attachments:
 
-- **Both in one message**: the XML is used and the PDF is ignored (not even
-  decoded).
+- **Both in one message**: the XML is used and the PDF is ignored (with Google
+  sign-in it is not even downloaded).
 - **PDF first, XML later** (another message, same folio): the XML bill replaces
   the PDF one. The paid flag is kept.
 - **XML first, PDF later**: the PDF is ignored. A PDF never replaces an XML bill.
@@ -34,15 +34,26 @@ CFE's PDFs have a broken text layer (the embedded fonts' character maps do not
 match the glyphs), so ordinary copy/paste gives gibberish. The integration
 recognizes each glyph by its outline (a table of Arial outline hashes ships in
 `glyphs.json`; no font data), rebuilds the character maps and reads the text.
-No OCR, nothing is rendered.
+No OCR, nothing is rendered. A glyph that is not recognized leaves the field
+it belongs to empty rather than wrong. A PDF is only taken as a bill if it
+names CFE, has at least two of the labels *PERIODO FACTURADO*, *TOTAL A
+PAGAR* and *LÍMITE DE PAGO* (so a payment receipt is not a bill), its charges
+add up to the total and its meter reading matches the kWh; otherwise it is
+skipped with a warning.
 
 A bill read from the PDF has the same amount, dates, period, kWh, tariff,
-meter reading, tiers, line items, payment reference and folio as the XML. It
-has no issue date (*Bill date* stays unknown), no consumption history, daily
-cost, real energy cost or summer season. The *Amount due* sensor's `source`
-attribute says where the bill came from (`xml` or `pdf`). *Government
-subsidy* shows the "Apoyo Gubernamental" amount printed on the PDF, which can
-differ from the XML's `AportacionGub`.
+meter reading, line items, payment reference and folio as the XML. Its tiers
+differ: the PDF prints whole kWh per tier plus each tier's subtotal (the
+`subtotal` in the *Energy* tiers attribute), while the XML has fractional kWh
+and no subtotal. It has no issue date (*Bill date* stays unknown), no
+consumption history, daily cost, real energy cost or summer season. The
+*Amount due* sensor's `source` attribute says where the bill came from (`xml`
+or `pdf`).
+
+*Government subsidy* stays empty for a PDF bill: the "Apoyo Gubernamental"
+amount printed on the PDF is a different figure from the XML's
+`AportacionGub` (75.29 vs 265.29 on the same bill). The printed amount is the
+*Amount due* attribute `apoyo_impreso`.
 
 Tip: in Gmail, a filter on `from:cfe.mx has:attachment` can label the bills
 (and, for IMAP, the label can be the folder to read).
@@ -155,7 +166,7 @@ One device, `CFE <RPU>`, with:
 
 | Entity | Description |
 |---|---|
-| Amount due | Total to pay (MXN). Attributes: folio, source (`xml`/`pdf`), payment reference, invoice total, line items |
+| Amount due | Total to pay (MXN). Attributes: folio, source (`xml`/`pdf`), printed subsidy (`apoyo_impreso`, PDF bills), payment reference, invoice total, line items |
 | Due date | Payment deadline (`FECLIMITE`) |
 | Cut-off date | Date the service can be cut (`FECORTE`) |
 | Period start / end | Billing period |
@@ -165,7 +176,7 @@ One device, `CFE <RPU>`, with:
 | Daily cost | Average cost per day (MXN) |
 | Meter reading | Current meter reading (total increasing). Attributes: meter id, previous reading |
 | Tariff | e.g. `1A`. Attributes: summer season months |
-| Government subsidy | `AportacionGub` (MXN) |
+| Government subsidy | `AportacionGub` (MXN; empty for a bill read from the PDF) |
 | Real energy cost | Cost without subsidy (MXN) |
 | Paid (binary sensor) | Local paid flag for the latest bill |
 | Mark paid (button) | Marks the latest bill as paid |
@@ -232,11 +243,11 @@ visible.
 
 ```sh
 # Parsers (XML, PDF), IMAP and Gmail clients (no Home Assistant needed)
-uvx --with pytest --with pypdf --with fonttools pytest -q tests
+uvx --with pytest --with pypdf==6.20.1 --with fonttools==4.66.1 pytest -q tests
 
 # Home Assistant integration tests (config flows incl. Google OAuth, polling, Store, statistics)
 uvx -p 3.14 --with pytest-homeassistant-custom-component==0.13.372 \
-  pytest -q tests_ha -o asyncio_mode=auto
+  --with pypdf==6.20.1 --with fonttools==4.66.1 pytest -q tests_ha -o asyncio_mode=auto
 ```
 
 The parsers (`custom_components/cfe/parser.py`, `pdfbill.py`) have no Home
@@ -250,8 +261,13 @@ compares them with the XML of the same bill.
 
 `custom_components/cfe/glyphs.json` (outline hash → character) is generated
 from local Arial fonts (macOS `Arial`, `Arial Bold`, `Arial Black`,
-`Arial Italic`) by `python tools/make_glyph_table.py` (needs fonttools). The
-font files themselves are never committed.
+`Arial Italic`) by `python tools/make_glyph_table.py` (needs fonttools).
+Provenance: it holds only one-way md5 hashes of glyph outlines (operator
+names and integer coordinates, components decomposed; see
+`pdfbill.glyph_hash`) and the characters they stand for. No outlines,
+metrics or other font data are in it, and the font files themselves are
+never committed. Changing `glyph_hash` means regenerating the table (a test
+pins the hash of a synthetic glyph).
 
 ## License
 

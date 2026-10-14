@@ -28,7 +28,7 @@ POISON = (
 
 
 class FakeIMAP:
-    """Just enough of imaplib.IMAP4_SSL for fetch_new_xml."""
+    """Just enough of imaplib.IMAP4_SSL for fetch_new_bills."""
 
     instances: list[FakeIMAP] = []
 
@@ -90,7 +90,7 @@ def fake_imap(monkeypatch):
 
 
 def _fetch(uidvalidity, last_uid):
-    return cfe_mail.fetch_new_xml("h", 993, "u", "p", "INBOX", uidvalidity, last_uid)
+    return cfe_mail.fetch_new_bills("h", 993, "u", "p", "INBOX", uidvalidity, last_uid)
 
 
 def test_new_messages(fake_imap, bill_xml) -> None:

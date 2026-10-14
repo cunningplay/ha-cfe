@@ -8,34 +8,45 @@ writes ``outline hash -> character``. No font data ends up in the table.
     python tools/make_glyph_table.py [font.ttf ...]
 
 Default fonts: macOS ``/System/Library/Fonts/Supplemental/Arial*.ttf``.
-Needs fonttools. The hash must match ``pdfbill.glyph_hash``.
+Needs fonttools. The hash is ``pdfbill.glyph_hash`` (imported, not copied).
+
+The table holds one-way md5 hashes of glyph outlines and the characters they
+stand for: no outlines, metrics or other font data.
 """
 
 from __future__ import annotations
 
-import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import sys
+import types
 
-from fontTools.pens.recordingPen import DecomposingRecordingPen
 from fontTools.ttLib import TTFont
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "custom_components" / "cfe" / "glyphs.json"
+PACKAGE_DIR = ROOT / "custom_components" / "cfe"
+OUT = PACKAGE_DIR / "glyphs.json"
 FONT_DIR = Path("/System/Library/Fonts/Supplemental")
 FONTS = ["Arial.ttf", "Arial Bold.ttf", "Arial Black.ttf", "Arial Italic.ttf"]
 EXTRA = "–—‘’“”•¡¿°€…"
 CHARS = [chr(c) for c in range(0x20, 0x250) if chr(c).isprintable()] + list(EXTRA)
 
 
-def glyph_hash(glyph_set, name: str) -> str | None:
-    """md5 of the decomposed outline (None for an empty glyph)."""
-    pen = DecomposingRecordingPen(glyph_set)
-    glyph_set[name].draw(pen)
-    if not pen.value:
-        return None
-    return hashlib.md5(repr(pen.value).encode()).hexdigest()
+def _load_pdfbill():
+    """pdfbill without the integration's __init__ (which imports Home Assistant)."""
+    package = types.ModuleType("cfe_pure")
+    package.__path__ = [str(PACKAGE_DIR)]
+    sys.modules["cfe_pure"] = package
+    for name in ("parser", "pdfbill"):
+        spec = importlib.util.spec_from_file_location(f"cfe_pure.{name}", PACKAGE_DIR / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+glyph_hash = _load_pdfbill().glyph_hash
 
 
 def main(paths: list[Path]) -> None:

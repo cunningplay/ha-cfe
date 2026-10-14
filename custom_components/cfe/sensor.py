@@ -58,6 +58,9 @@ SENSORS: tuple[CfeSensorDescription, ...] = (
         attrs_fn=lambda b: {
             "folio": b.folio,
             "source": b.source,
+            # PDF bills: the printed "Apoyo Gubernamental" (the subsidy sensor
+            # stays empty; it is the XML's AportacionGub, a different figure)
+            "apoyo_impreso": b.printed_subsidy,
             "payment_reference": b.payment_reference,
             "invoice_total": b.invoice_total,
             "line_items": [{"name": i.name, "amount": i.amount} for i in b.line_items],

@@ -98,6 +98,7 @@ class Bill:
     summer_end: str | None = None
     history: list[HistoryPoint] = field(default_factory=list)
     source: str = "xml"  # "xml" (CFDI) or "pdf" (read from the printed bill)
+    printed_subsidy: float | None = None  # PDF "Apoyo Gubernamental" (not AportacionGub)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-safe primitives (dates as ISO strings)."""
@@ -121,15 +122,20 @@ class Bill:
             values["issued"] = datetime.fromisoformat(issued) if issued else None
         except (TypeError, ValueError):
             values["issued"] = None
-        values["line_items"] = [LineItem(**i) for i in values.get("line_items") or []]
-        values["tiers"] = [Tier(**t) for t in values.get("tiers") or []]
+        values["line_items"] = [_known(LineItem, i) for i in values.get("line_items") or []]
+        values["tiers"] = [_known(Tier, t) for t in values.get("tiers") or []]
         if values.get("source") not in ("xml", "pdf"):
             values["source"] = "xml"  # stored before v0.3.0: always XML
-        values["history"] = [HistoryPoint(**h) for h in values.get("history") or []]
+        values["history"] = [_known(HistoryPoint, h) for h in values.get("history") or []]
         return cls(**values)
 
 
 _DATE_FIELDS = ("period_start", "period_end", "due_date", "cutoff_date")
+
+
+def _known(cls: Any, data: dict[str, Any]) -> Any:
+    """Build a dataclass from a dict, ignoring keys it does not know."""
+    return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 def _iso_date(value: Any) -> date | None:

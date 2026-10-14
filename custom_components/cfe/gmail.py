@@ -23,6 +23,7 @@ QUERY = "has:attachment (filename:xml OR filename:pdf)"
 PAGE_SIZE = 500
 MAX_PAGES = 40  # 20 000 messages: a safety stop, not a real limit
 MAX_PER_POLL = 50  # new messages read per poll; the rest wait for the next one
+MAX_PDF_BYTES = 10 * 1024 * 1024  # same cap as pdfbill
 TIMEOUT = 30
 
 # Google error reasons (error.errors[].reason, error.status, error.details[].reason)
@@ -167,10 +168,31 @@ class GmailClient:
             _LOGGER.warning("Gmail listing stopped after %d pages", MAX_PAGES)
         return ids
 
-    async def _message_bills(self, message_id: str) -> list[tuple[str, bytes]]:
+    async def _message_bills(
+        self, message_id: str, xml_is_bill: Callable[[bytes], bool] | None
+    ) -> list[tuple[str, bytes]]:
+        """XML parts first; PDF parts only if no XML part is a bill."""
         message = await self._get(f"messages/{message_id}", {"format": "full"})
+        parts = _bill_parts(message.get("payload") or {})
+        found = await self._download(message_id, [p for k, p in parts if k == "xml"], "xml")
+        if xml_is_bill is not None and any(xml_is_bill(p) for _, p in found):
+            return found
+        pdfs = []
+        for kind, part in parts:
+            if kind != "pdf":
+                continue
+            size = (part.get("body") or {}).get("size")
+            if isinstance(size, int) and size > MAX_PDF_BYTES:
+                _LOGGER.warning("Skipping %d-byte PDF in %s: too large", size, message_id)
+                continue
+            pdfs.append(part)
+        return found + await self._download(message_id, pdfs, "pdf")
+
+    async def _download(
+        self, message_id: str, parts: list[dict[str, Any]], kind: str
+    ) -> list[tuple[str, bytes]]:
         found = []
-        for kind, part in _bill_parts(message.get("payload") or {}):
+        for part in parts:
             body = part.get("body") or {}
             data = body.get("data")
             if not data and body.get("attachmentId"):
@@ -189,10 +211,17 @@ class GmailClient:
                 found.append((kind, payload))
         return found
 
-    async def fetch_new_xml(
-        self, known_ids: Collection[str], limit: int | None = None
+    async def fetch_new_bills(
+        self,
+        known_ids: Collection[str],
+        limit: int | None = None,
+        xml_is_bill: Callable[[bytes], bool] | None = None,
     ) -> GmailFetchResult:
         """Fetch .xml/.pdf attachments from up to ``limit`` messages not in ``known_ids``.
+
+        A message's PDFs are downloaded only when ``xml_is_bill`` is not given
+        or none of its XML attachments is a bill; PDFs over MAX_PDF_BYTES
+        (Gmail's part size) are skipped.
 
         Oldest first. Each message is fetched once: its id goes into
         ``processed_ids`` once looked at; a message or attachment Gmail cannot
@@ -207,7 +236,7 @@ class GmailClient:
         result = GmailFetchResult(more=len(new_ids) > limit)
         for message_id in new_ids[:limit]:
             try:
-                payloads = await self._message_bills(message_id)
+                payloads = await self._message_bills(message_id, xml_is_bill)
             except GmailSkipError as err:
                 _LOGGER.warning("Skipping Gmail message %s: %s", message_id, err)
                 payloads = []

@@ -44,7 +44,7 @@ from .const import (
     STORAGE_VERSION,
 )
 from .gmail import GmailAuthError, GmailClient, GmailError
-from .mail import MailAuthError, MailError, fetch_new_xml
+from .mail import MailAuthError, MailError, fetch_new_bills
 from .parser import Bill, BillParseError, parse_bill
 from .pdfbill import parse_pdf_bill
 
@@ -82,6 +82,14 @@ class _Fetched:
     moved: bool  # the source cursor changed (worth saving)
     commit: Callable[[], None]  # applies the new cursor once bills are handled
     more: bool = False  # more new messages wait for the next poll
+
+
+def _is_cfe_xml(payload: bytes) -> bool:
+    """The XML is a CFE bill (any service): the message's PDFs are not needed."""
+    try:
+        return parse_bill(payload) is not None
+    except BillParseError:
+        return False
 
 
 def _sort_key(bill: Bill) -> tuple[date, datetime]:
@@ -168,7 +176,7 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
         entry = self.config_entry
         try:
             result = await self.hass.async_add_executor_job(
-                fetch_new_xml,
+                fetch_new_bills,
                 entry.data[CONF_HOST],
                 entry.data[CONF_PORT],
                 entry.data[CONF_USERNAME],
@@ -196,7 +204,9 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
         """New bill attachments over the Gmail API (each message fetched once)."""
         assert self._gmail is not None
         try:
-            result = await self._gmail.fetch_new_xml(self._gmail_ids)
+            result = await self._gmail.fetch_new_bills(
+                self._gmail_ids, xml_is_bill=_is_cfe_xml
+            )
         except GmailAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except GmailError as err:

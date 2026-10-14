@@ -136,7 +136,7 @@ def _is_gmail(conn: imaplib.IMAP4) -> bool:
     return b"X-GM-EXT-1" in caps
 
 
-def fetch_new_xml(
+def fetch_new_bills(
     host: str,
     port: int,
     user: str,

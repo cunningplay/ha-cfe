@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from functools import cache
 import hashlib
+import math
 from io import BytesIO
 import json
 import logging
@@ -30,7 +31,10 @@ _LOGGER = logging.getLogger(__name__)
 GLYPHS_FILE = Path(__file__).resolve().parent / "glyphs.json"
 MAX_PDF_BYTES = 10 * 1024 * 1024
 MAX_GLYPHS = 4000  # CFE's subset fonts have ~100
-_UNKNOWN = "\ufffd"  # mapped for unrecognized glyphs, then removed from the text
+MAX_PAGES = 4  # CFE bills have 2
+# Unrecognized glyphs become this marker. No number, date or label pattern
+# matches it, so a field with a lost character becomes None instead of wrong.
+UNKNOWN = "\ufffd"
 
 
 @cache
@@ -39,15 +43,28 @@ def glyph_table() -> dict[str, str]:
     return json.loads(GLYPHS_FILE.read_text(encoding="utf-8"))
 
 
+def _coord(value: float) -> int:
+    return math.floor(value + 0.5)
+
+
 def glyph_hash(glyph_set: Any, name: str) -> str | None:
-    """md5 of the decomposed outline; None for an empty glyph."""
+    """md5 of the decomposed outline in a canonical text form; None if empty.
+
+    One line per drawing operation: the operator name, then each point as
+    ``x,y`` rounded to integers (components decomposed). Shared with
+    ``tools/make_glyph_table.py``; changing it means regenerating glyphs.json.
+    """
     from fontTools.pens.recordingPen import DecomposingRecordingPen
 
     pen = DecomposingRecordingPen(glyph_set)
     glyph_set[name].draw(pen)
     if not pen.value:
         return None
-    return hashlib.md5(repr(pen.value).encode()).hexdigest()
+    canonical = "\n".join(
+        " ".join([op, *(f"{_coord(x)},{_coord(y)}" for x, y in points)])
+        for op, points in pen.value
+    )
+    return hashlib.md5(canonical.encode()).hexdigest()
 
 
 # ------------------------------------------------------------------ decoding
@@ -150,7 +167,7 @@ def _fix_font(font: Any, table: dict[str, str]) -> tuple[int, int]:
         elif digest in table:
             by_gid[gid] = table[digest]
         else:
-            by_gid[gid] = _UNKNOWN  # otherwise pypdf falls back to a wrong letter
+            by_gid[gid] = UNKNOWN
             unknown += 1
     cid_map = _cid_to_gid(descendant)
     if cid_map is None:
@@ -172,7 +189,7 @@ def pdf_text(data: bytes) -> str:
 
     if len(data) > MAX_PDF_BYTES:
         raise BillParseError("PDF too large")
-    if not data.lstrip()[:5].startswith(b"%PDF"):
+    if b"%PDF" not in data[:1024]:
         raise BillParseError("not a PDF")
     table = glyph_table()
     try:
@@ -182,48 +199,64 @@ def pdf_text(data: bytes) -> str:
         fixed: list[Any] = []  # font dicts already rebuilt (shared across pages)
         unknown = 0
         pages = []
-        for page in reader.pages:
+        for page in reader.pages[:MAX_PAGES]:
             for font in _resources(page.get("/Resources"), set()):
                 if any(font is done for done in fixed):
                     continue
                 fixed.append(font)
-                unknown += _fix_font(font, table)[1]
+                try:
+                    unknown += _fix_font(font, table)[1]
+                except Exception as err:  # noqa: BLE001 - skip just this font
+                    _LOGGER.debug("CFE PDF: font skipped: %r", err)
             pages.append(page.extract_text() or "")
     except BillParseError:
         raise
     except Exception as err:  # noqa: BLE001 - pypdf/fontTools raise many kinds
         raise BillParseError(f"unreadable PDF: {err!r}") from err
     if unknown:
-        _LOGGER.warning("CFE PDF: %d glyph(s) not recognized were dropped", unknown)
-    return "\n".join(pages).replace(_UNKNOWN, "")
+        _LOGGER.warning(
+            "CFE PDF: %d glyph(s) not recognized; fields using them are left empty",
+            unknown,
+        )
+    return "\n".join(pages)
 
 
 # ------------------------------------------------------------------ parsing
 
-_DATE = r"(\d{1,2}\s+[A-Za-z]{3}\s+\d{2,4})"
-_AMOUNT = r"(-?[\d,]+\.\d{2})"
+_END = r"(?![\d�])"  # a number must not run into a digit or a lost glyph
+_DATE = r"(\d{1,2}\s+[A-Za-z]{3}\s+\d{2,4})" + _END
+_AMOUNT = r"(-?[\d,]+\.\d{2})" + _END
 _ISSUER = re.compile(
     r"CFE\s*370814\s*QI0|Comisi[oó]n\s+Federal\s+de\s+Electricidad", re.IGNORECASE
 )
-_RPU = re.compile(r"NO\.\s*DE\s*SERVICIO:\s*(\d{12})")
-_DUE = re.compile(r"L[IÍ]?MITE\s+DE\s+PAGO:\s*" + _DATE)
+# Labels only a bill has (a payment receipt has the RFC, service number, folio)
+_BILL_LABELS = {
+    "PERIODO FACTURADO": re.compile(r"PERIODO\s+FACTURADO"),
+    "TOTAL A PAGAR": re.compile(r"TOTAL\s+A\s+PAGAR"),
+    "LÍMITE DE PAGO": re.compile(r"L[IÍ�]MITE\s+DE\s+PAGO"),
+}
+_RPU = re.compile(r"NO\.\s*DE\s*SERVICIO:\s*(\d{12})" + _END)
+_DUE = re.compile(r"L[IÍ�]MITE\s+DE\s+PAGO:\s*" + _DATE)
 _CUTOFF = re.compile(r"CORTE\s+A\s+PARTIR(?:\s+DEL)?:?\s*" + _DATE, re.IGNORECASE)
 _PERIOD = re.compile(r"PERIODO\s+FACTURADO:\s*" + _DATE + r"\s*-\s*" + _DATE)
 # "TARIFA:1ANO. MEDIDOR:..." (the two labels can run together)
 _TARIFF = re.compile(r"TARIFA:\s*([0-9A-Z]+?)\s*(?:NO\.\s*MEDIDOR|$)", re.MULTILINE)
 _METER = re.compile(r"NO\.\s*MEDIDOR:\s*([0-9A-Z]+?)\s*(?:MULTIPLICADOR|$)", re.MULTILINE)
-_MULTIPLIER = re.compile(r"MULTIPLICADOR:\s*(\d+)")
-_TO_PAY = re.compile(r"TOTAL\s+A\s+PAGAR:\s*\$?\s*([\d,]+(?:\.\d{2})?)")
+_MULTIPLIER = re.compile(r"MULTIPLICADOR:\s*(\d+)" + _END)
+_TO_PAY = re.compile(r"TOTAL\s+A\s+PAGAR:\s*\$?\s*([\d,]+(?:\.\d{2})?)(?![\d,.�])")
 _READING = re.compile(r"^\s*([\d,]+)\s+([\d,]+)\s+([\d,]+)\s*$", re.MULTILINE)
+_TIER_NAME = r"B[aá]sico|Intermedio(?:\s+(?:bajo|alto))?|Excedente"
 _TIER = re.compile(
-    r"^\s*(B[aá]sico|Intermedio(?:\s+(?:bajo|alto))?|Excedente)\s+"
-    r"([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s*$",
+    rf"^\s*({_TIER_NAME})\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s*$",
     re.MULTILINE | re.IGNORECASE,
 )
-_ITEM = re.compile(r"^\s*(\S.*?)\s+\$?" + _AMOUNT + r"\s*$")
+_TIER_START = re.compile(rf"^\s*(?:{_TIER_NAME})\b", re.IGNORECASE)
+# One amount at the end; a lost glyph inside it keeps the line (amount None).
+_ITEM = re.compile(r"^\s*(\S.*?)\s+\$?(-?[\d,�]+\.[\d�]{2})\s*$")
 _SUBSIDY = re.compile(r"Apoyo\s+Gubernamental\s+\$?" + _AMOUNT)
-_REFERENCE = re.compile(r"\b(\d{2}\s\d{12}\s\d{6}\s\d{9}\s\d)\b")
-_FOLIO = re.compile(r"\bFolio:\s*(\d{6,})")
+_REFERENCE = re.compile(r"\b(\d{2}\s\d{12}\s\d{6}\s\d{9}\s\d)\b" + _END)
+_FOLIO = re.compile(r"\bFolio:\s*(\d{6,})" + _END)
+_TOLERANCE = 0.05
 
 
 def _match(pattern: re.Pattern[str], text: str, group: int = 1) -> str | None:
@@ -232,12 +265,16 @@ def _match(pattern: re.Pattern[str], text: str, group: int = 1) -> str | None:
 
 
 def _line_item(line: str) -> LineItem | None:
-    """``Name 123.45`` with exactly one amount (not a multi-column table row)."""
+    """``Name 123.45`` with exactly one amount (not a table row, not a tier)."""
     found = _ITEM.match(line)
     if not found:
         return None
     name = found.group(1)
-    if re.search(r"\d\.\d{2}\b", name) or not re.search(r"[A-Za-zÀ-ÿ]", name):
+    if (
+        re.search(r"\d[.,]\d", name)
+        or not re.search(r"[A-Za-zÀ-ÿ]", name)
+        or _TIER_START.match(name)
+    ):
         return None
     return LineItem(name=name, amount=_float(found.group(2)))
 
@@ -258,17 +295,29 @@ def _line_items(text: str) -> list[LineItem]:
     return best
 
 
-def _reading(text: str, multiplier: int) -> tuple[int, int, float] | None:
-    """(current, previous, kWh) from the meter row, e.g. ``174 0 174``."""
-    rows = [
-        (_int(m.group(1)), _int(m.group(2)), _float(m.group(3)))
-        for m in _READING.finditer(text)
-    ]
-    rows = [r for r in rows if None not in r]
-    for current, previous, kwh in rows:
-        if current >= previous and (current - previous) * multiplier == kwh:
+def _consumed(current: int, previous: int, digits: int) -> int:
+    """Meter advance; a reading below the previous one rolled over."""
+    if current >= previous:
+        return current - previous
+    return current + 10**digits - previous
+
+
+def _reading(text: str, multiplier: int) -> tuple[int, int, float] | None | bool:
+    """(current, previous, kWh) from the meter row, e.g. ``174 0 174``.
+
+    None when there is no such row; False when rows exist but none is
+    consistent (current - previous, times the multiplier, must equal kWh).
+    """
+    rows = []
+    for m in _READING.finditer(text):
+        current, previous, kwh = _int(m.group(1)), _int(m.group(2)), _float(m.group(3))
+        if current is None or previous is None or kwh is None:
+            continue
+        rows.append((current, previous, kwh))
+        digits = max(len(m.group(1).replace(",", "")), len(m.group(2).replace(",", "")))
+        if _consumed(current, previous, digits) * multiplier == kwh:
             return current, previous, kwh
-    return rows[0] if rows else None  # type: ignore[return-value]
+    return False if rows else None
 
 
 def is_cfe_text(text: str) -> bool:
@@ -279,10 +328,20 @@ def is_cfe_text(text: str) -> bool:
 def parse_pdf_text(text: str, rpu: str | None = None) -> Bill | None:
     """Parse the decoded text of a CFE bill PDF.
 
-    Returns None when the text is not a CFE bill, has no service number or
-    folio, or (with ``rpu``) is for another service. Missing fields are None.
+    Returns None when the text is not a CFE bill (issuer plus at least two
+    bill-only labels), has no service number or folio, is for another
+    service (with ``rpu``), has neither period nor total, or fails the
+    consistency checks (charges add up to the total, meter reading matches
+    the kWh). Missing fields are None.
     """
     if not is_cfe_text(text):
+        return None
+    labels = [name for name, label in _BILL_LABELS.items() if label.search(text)]
+    if len(labels) < 2:
+        missing = [name for name in _BILL_LABELS if name not in labels]
+        _LOGGER.warning(
+            "CFE PDF without the bill labels %s: not read as a bill", ", ".join(missing)
+        )
         return None
     bill_rpu = _match(_RPU, text)
     if bill_rpu is None or (rpu is not None and bill_rpu != rpu):
@@ -298,19 +357,42 @@ def parse_pdf_text(text: str, rpu: str | None = None) -> Bill | None:
 
     multiplier = _int(_match(_MULTIPLIER, text)) or 1
     reading = _reading(text, multiplier)
+    if reading is False:
+        _LOGGER.warning(
+            "CFE PDF folio %s: meter reading does not match the kWh; not used", folio
+        )
+        return None
     current, previous, kwh = reading if reading else (None, None, None)
 
     items = _line_items(text)
-    named = {i.name.lower(): i.amount for i in items}
-    total = named.get("total")
-    if total is None:
-        total = _float(_match(_TO_PAY, text))
+    total = items[-1].amount if items else _float(_match(_TO_PAY, text))
+    if items:
+        charges = [
+            i.amount
+            for i in items[:-1]
+            if not i.name.lower().startswith("fac. del periodo")
+        ]
+        if (
+            total is None
+            or None in charges
+            or abs(sum(charges) - total) > _TOLERANCE  # type: ignore[arg-type]
+        ):
+            _LOGGER.warning(
+                "CFE PDF folio %s: charges do not add up to the total; not used", folio
+            )
+            return None
+    if end is None and total is None:
+        _LOGGER.warning("CFE PDF folio %s: no period and no total; not used", folio)
+        return None
+
     period_charge = next(
         (i.amount for i in items if i.name.lower().startswith("fac. del periodo")), None
     )
     dap = next((i.amount for i in items if i.name.upper() in ("DSAP", "DAP")), None)
     invoice_total = (
-        round(period_charge + (dap or 0.0), 2) if period_charge is not None else None
+        round(period_charge + dap, 2)
+        if period_charge is not None and dap is not None
+        else None
     )
 
     tiers = [
@@ -339,7 +421,8 @@ def parse_pdf_text(text: str, rpu: str | None = None) -> Bill | None:
         invoice_total=invoice_total,
         line_items=items,
         tiers=tiers,
-        subsidy=_float(_match(_SUBSIDY, text)),
+        # The printed "Apoyo Gubernamental" is not the XML's AportacionGub.
+        printed_subsidy=_float(_match(_SUBSIDY, text)),
         due_date=parse_spanish_date(_match(_DUE, text)),
         cutoff_date=parse_spanish_date(_match(_CUTOFF, text)),
         payment_reference=_match(_REFERENCE, text),

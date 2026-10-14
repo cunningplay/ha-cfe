@@ -73,7 +73,7 @@ def client(fake):
 
 
 def fetch(fake, known, **kwargs):
-    return asyncio.run(client(fake).fetch_new_xml(known, **kwargs))
+    return asyncio.run(client(fake).fetch_new_bills(known, **kwargs))
 
 
 def google_error(status, reason, api_status="PERMISSION_DENIED"):
@@ -97,9 +97,10 @@ def test_new_messages(fake, bill_xml) -> None:
     fake.attachments[("m2", "p")] = b"%PDF-1.4"
     result = fetch(fake, [])
     assert result.processed_ids == ["m1", "m2"]  # oldest first
-    assert result.attachments == [("m1", "xml", bill_xml), ("m2", "pdf", b"%PDF-1.4"), ("m2", "xml", b"<other/>")]
-    assert downloads(fake) == [f"{API}/messages/m1/attachments/a1", f"{API}/messages/m2/attachments/p",
-                               f"{API}/messages/m2/attachments/a2"]
+    # without xml_is_bill every PDF is downloaded; XML parts come first
+    assert result.attachments == [("m1", "xml", bill_xml), ("m2", "xml", b"<other/>"), ("m2", "pdf", b"%PDF-1.4")]
+    assert downloads(fake) == [f"{API}/messages/m1/attachments/a1", f"{API}/messages/m2/attachments/a2",
+                               f"{API}/messages/m2/attachments/p"]
 
 
 def test_known_ids_not_fetched(fake, bill_xml) -> None:
@@ -250,3 +251,20 @@ def test_pdf_only_message(fake) -> None:
     result = fetch(fake, [])
     assert result.attachments == [("m1", "pdf", b"%PDF-1.7")]
     assert downloads(fake) == [f"{API}/messages/m1/attachments/p1"]
+
+
+def pdf_part(att_id: str, size: int = 9) -> dict:
+    return {"mimeType": "application/pdf", "filename": "Recibo.pdf", "body": {"attachmentId": att_id, "size": size}}
+
+
+def test_pdf_downloaded_only_without_xml_bill(fake, bill_xml) -> None:
+    fake.add("m1", [pdf_part("p1"), xml_part("a1")])  # XML bill: its PDF is not needed
+    fake.add("m2", [pdf_part("p2"), xml_part("a2")])  # XML that is not a bill: PDF wanted
+    fake.add("m3", [pdf_part("p3", size=cfe_gmail.MAX_PDF_BYTES + 1), pdf_part("p4")])
+    fake.attachments.update({("m1", "a1"): bill_xml, ("m2", "a2"): b"<x/>", ("m2", "p2"): b"%PDF-2",
+                             ("m3", "p4"): b"%PDF-4"})
+    result = asyncio.run(client(fake).fetch_new_bills([], xml_is_bill=lambda p: p == bill_xml))
+    assert result.attachments == [("m1", "xml", bill_xml), ("m2", "xml", b"<x/>"), ("m2", "pdf", b"%PDF-2"),
+                                  ("m3", "pdf", b"%PDF-4")]
+    assert not any(u.endswith(("/p1", "/p3")) for u in downloads(fake))
+    assert result.processed_ids == ["m1", "m2", "m3"]

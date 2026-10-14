@@ -36,7 +36,8 @@ def test_pdf_text_fields(bill_pdf_text: str) -> None:
     assert bill.tariff == "1A"
     assert bill.meter_id == "9ZZZ99"
     assert (bill.meter_current, bill.meter_previous) == (174, 0)
-    assert bill.subsidy == 75.29
+    assert bill.subsidy is None  # the printed figure is not AportacionGub
+    assert bill.printed_subsidy == 75.29
     assert bill.payment_reference == "01 000111222333 261009 000001128 5"
     assert [(t.name, t.kwh, t.price, t.subtotal) for t in bill.tiers] == [
         ("Básico", 9, 1.013, 9.8),
@@ -90,21 +91,92 @@ def test_labels_lost_skips(bill_pdf_text: str) -> None:
     assert parse_pdf_text(bill_pdf_text.replace("Folio:", "Fol:"), RPU) is None
 
 
-def test_dropped_glyphs_still_parse(bill_pdf_text: str) -> None:
-    # "Í" unknown -> "LMITE"; a stray glyph dropped elsewhere
-    text = bill_pdf_text.replace("LÍMITE", "LMITE").replace("Apoyo", "Apyo")
+M = cfe_pdfbill.UNKNOWN  # what an unrecognized glyph decodes to
+
+
+def test_unknown_glyphs_still_parse(bill_pdf_text: str) -> None:
+    # "Í" unknown inside a label; a lost glyph in a non-key field
+    text = bill_pdf_text.replace("LÍMITE", f"L{M}MITE").replace("Apoyo", f"Ap{M}yo")
     bill = parse_pdf_text(text, RPU)
     assert bill.due_date == date(2026, 10, 9)
-    assert bill.subsidy is None
+    assert bill.printed_subsidy is None
+
+
+@pytest.mark.parametrize(("old", "new", "field"), [
+    ("LÍMITE DE PAGO:09 OCT 26", f"LÍMITE DE PAGO:0{M} OCT 26", "due_date"),
+    ("$1,128\n", f"$1,{M}28\n", None),  # TOTAL A PAGAR is not used when the breakdown is there
+    ("01 000111222333 261009 000001128 5", f"01 000111222333 261009 00000{M}128 5", "payment_reference"),
+    ("174 0 174", f"174 0 1{M}4", "kwh"),
+    ("Básico 9 1.013 9.80", f"Básico 9 1.{M}13 9.80", None),
+])
+def test_unknown_glyph_in_value_gives_none(bill_pdf_text: str, old, new, field) -> None:
+    assert old in bill_pdf_text
+    bill = parse_pdf_text(bill_pdf_text.replace(old, new), RPU)
+    assert bill is not None and bill.total == 1128.28
+    if field:
+        assert getattr(bill, field) is None
+
+
+@pytest.mark.parametrize("total", [f"Total 1,{M}28.28", f"Total {M},128.28", "Total 128.28"])
+def test_lost_digit_in_total_rejects(bill_pdf_text: str, total, caplog) -> None:
+    assert parse_pdf_text(bill_pdf_text.replace("Total 1,128.28", total), RPU) is None
+    assert "do not add up" in caplog.text
+
+
+def test_charges_must_add_up(bill_pdf_text: str, caplog) -> None:
+    assert parse_pdf_text(bill_pdf_text.replace("Deposito 679.00", "Deposito 79.00"), RPU) is None
+    # within 0.05 is fine
+    assert parse_pdf_text(bill_pdf_text.replace("IVA  8% 25.46", "IVA  8% 25.50"), RPU) is not None
+
+
+def test_meter_reading_must_match_kwh(bill_pdf_text: str, caplog) -> None:
+    assert parse_pdf_text(bill_pdf_text.replace("174 0 174", "174 0 170"), RPU) is None
+    assert "meter reading" in caplog.text
+    # rollover: 99950 -> 00124 is 174 kWh
+    bill = parse_pdf_text(bill_pdf_text.replace("174 0 174", "00124 99950 174"), RPU)
+    assert (bill.meter_current, bill.meter_previous, bill.kwh) == (124, 99950, 174)
+
+
+def test_payment_receipt_is_not_a_bill(caplog) -> None:
+    receipt = (
+        "COMPROBANTE DE PAGO\nComisión Federal de Electricidad RFC CFE370814QI0\n"
+        "NO. DE SERVICIO:000111222333\nImporte pagado $1,128.00\nFolio: 000012345678\n"
+    )
+    assert parse_pdf_text(receipt, RPU) is None
+    assert "PERIODO FACTURADO" in caplog.text and "WARNING" in caplog.text
+    # one bill label is not enough
+    assert parse_pdf_text(receipt + "TOTAL A PAGAR: $1,128\n", RPU) is None
+
+
+def test_no_period_and_no_total(bill_pdf_text: str) -> None:
+    text = (
+        bill_pdf_text.replace("28 AGO 26-23 SEP 26", "")
+        .replace("Total 1,128.28", "Totl")
+        .replace("$1,128\n", "\n")
+    )
+    assert parse_pdf_text(text, RPU) is None
+
+
+def test_invoice_total_needs_both(bill_pdf_text: str) -> None:
+    text = bill_pdf_text.replace("DSAP 105.58\n", "").replace("Deposito 679.00", "Deposito 784.58")
+    bill = parse_pdf_text(text, RPU)
+    assert bill.total == 1128.28 and bill.invoice_total is None
+
+
+def test_tier_rows_never_line_items() -> None:
+    assert cfe_pdfbill._line_item("Básico 9 1.013 9.80") is None
+    assert cfe_pdfbill._line_item("Excedente 9.80") is None
+    assert cfe_pdfbill._line_item("Energía 318.24").amount == 318.24
 
 
 def test_missing_fields_give_none(bill_pdf_text: str) -> None:
-    keep = ("NO. DE SERVICIO", "Folio:", "Comisión Federal")
+    keep = ("NO. DE SERVICIO", "Folio:", "Comisión Federal", "TOTAL A PAGAR", "$1,128")
     text = "\n".join(line for line in bill_pdf_text.splitlines() if any(k in line for k in keep))
-    bill = parse_pdf_text(text, RPU)
+    bill = parse_pdf_text(text + "\nPERIODO FACTURADO:", RPU)
     assert bill is not None and bill.folio == "000012345678"
-    for name in ("total", "invoice_total", "due_date", "cutoff_date", "period_start", "kwh",
-                 "days", "daily_kwh", "tariff", "meter_id", "subsidy", "payment_reference"):
+    assert bill.total == 1128
+    for name in ("invoice_total", "due_date", "cutoff_date", "period_start", "period_end", "kwh",
+                 "days", "daily_kwh", "tariff", "meter_id", "printed_subsidy", "payment_reference"):
         assert getattr(bill, name) is None, name
     assert bill.line_items == [] and bill.tiers == []
 
@@ -138,6 +210,12 @@ def test_round_trip_and_old_store(bill_pdf_text: str, bill_xml: bytes) -> None:
         del tier["subtotal"]
     restored = cfe_parser.Bill.from_dict(old)
     assert restored.source == "xml" and restored.tiers[0].subtotal is None
+    # fields from a newer version are ignored (downgrade safety)
+    newer = bill.to_dict() | {"future": 1}
+    newer["tiers"][0]["future"] = 1
+    newer["line_items"][0]["future"] = 1
+    newer["history"] = [{"year": 2026, "month": 7, "kwh": 1.0, "future": 1}]
+    assert cfe_parser.Bill.from_dict(newer).tiers == bill.tiers
 
 
 # ------------------------------------------------------- synthetic PDF decode
@@ -197,7 +275,8 @@ def _table(font_bytes: bytes, gid: dict[str, int], skip: str = "") -> dict[str, 
     return table
 
 
-def _pdf(lines: list[str], font_bytes: bytes, gid: dict[str, int], encrypt: bool = False) -> bytes:
+def _pdf(lines: list[str], font_bytes: bytes, gid: dict[str, int], encrypt: bool = False,
+         pages: int = 1) -> bytes:
     """One page drawing ``lines`` with a Type0 font whose ToUnicode is wrong.
 
     The second half of the lines is drawn inside a Form XObject.
@@ -272,6 +351,8 @@ def _pdf(lines: list[str], font_bytes: bytes, gid: dict[str, int], encrypt: bool
         n("/Font"): fonts, n("/XObject"): DictionaryObject({n("/X1"): form}),
     })
     page[n("/Contents")] = writer._add_object(stream(draw(lines[:half], 980) + b"\n/X1 Do"))
+    for _ in range(pages - 1):
+        writer.add_page(page)
     if encrypt:
         writer.encrypt("secret")
     out = BytesIO()
@@ -302,18 +383,65 @@ def test_decode_synthetic_pdf(synthetic, bill_pdf_text, monkeypatch) -> None:
     assert cfe_pdfbill.parse_pdf_bill(data, "999999999999") is None
 
 
-def test_unknown_glyphs_dropped(synthetic, monkeypatch, caplog) -> None:
+def test_unknown_glyphs_marked(synthetic, monkeypatch, caplog) -> None:
     lines, font_bytes, gid = synthetic
     data = _pdf(lines, font_bytes, gid)
     monkeypatch.setattr(cfe_pdfbill, "glyph_table", lambda: _table(font_bytes, gid, skip="JÍ"))
     text = cfe_pdfbill.pdf_text(data)
-    assert "LMITE DE PAGO" in text
+    assert f"L{M}MITE DE PAGO" in text
     assert "glyph(s) not recognized" in caplog.text
     bill = cfe_pdfbill.parse_pdf_bill(data, RPU)
     assert bill.due_date == date(2026, 10, 9) and bill.total == 1128.28
     # a glyph used by a key label: the PDF is not taken as a bill
     monkeypatch.setattr(cfe_pdfbill, "glyph_table", lambda: _table(font_bytes, gid, skip="V"))
     assert cfe_pdfbill.parse_pdf_bill(data, RPU) is None
+    # a lost digit: "1" unknown -> the total line no longer adds up
+    monkeypatch.setattr(cfe_pdfbill, "glyph_table", lambda: _table(font_bytes, gid, skip="1"))
+    assert cfe_pdfbill.parse_pdf_bill(data, RPU) is None
+
+
+def test_page_cap(synthetic, monkeypatch) -> None:
+    lines, font_bytes, gid = synthetic
+    data = _pdf(lines[:8], font_bytes, gid, pages=6)
+    assert len(pypdf.PdfReader(BytesIO(data)).pages) == 6
+    monkeypatch.setattr(cfe_pdfbill, "glyph_table", lambda: _table(font_bytes, gid))
+    assert cfe_pdfbill.pdf_text(data).count("NO. DE SERVICIO") == cfe_pdfbill.MAX_PAGES == 4
+
+
+def test_bad_font_skipped(synthetic, monkeypatch, bill_pdf_text) -> None:
+    lines, font_bytes, gid = synthetic
+    data = _pdf(lines, font_bytes, gid)
+    monkeypatch.setattr(cfe_pdfbill, "glyph_table", lambda: _table(font_bytes, gid))
+    monkeypatch.setattr(cfe_pdfbill, "_fix_font", lambda *a: 1 / 0)
+    text = cfe_pdfbill.pdf_text(data)  # the font keeps its wrong map; no exception
+    assert "NO. DE SERVICIO" not in text
+
+
+def test_pdf_header_within_1024_bytes(synthetic, monkeypatch) -> None:
+    lines, font_bytes, gid = synthetic
+    monkeypatch.setattr(cfe_pdfbill, "glyph_table", lambda: _table(font_bytes, gid))
+    data = b"\r\n" * 100 + _pdf(lines, font_bytes, gid)
+    assert cfe_pdfbill.parse_pdf_bill(data, RPU) is not None
+    with pytest.raises(cfe_parser.BillParseError, match="not a PDF"):
+        cfe_pdfbill.parse_pdf_bill(b" " * 1024 + b"%PDF-1.7", RPU)
+
+
+def test_glyph_hash_is_pinned() -> None:
+    """The canonical outline hash must not change (glyphs.json depends on it)."""
+    import hashlib
+
+    from fontTools.ttLib import TTFont
+
+    font_bytes, gid = _font(["A", "a", "á"])
+    font = TTFont(BytesIO(font_bytes))
+    glyph_set = font.getGlyphSet()
+    order = font.getGlyphOrder()
+    # "A": the rectangle _font draws, as fontTools reads it back (origin at 0)
+    canonical = "moveTo 0,0\nlineTo 0,102\nlineTo 16,102\nlineTo 16,0\nclosePath"
+    assert hashlib.md5(canonical.encode()).hexdigest() == "f76997595b7dd40879267024fb3e66e9"
+    assert cfe_pdfbill.glyph_hash(glyph_set, order[gid["A"]]) == "f76997595b7dd40879267024fb3e66e9"
+    # composite glyphs are hashed decomposed
+    assert cfe_pdfbill.glyph_hash(glyph_set, order[gid["á"]]) == "c4936b3c423a42e13ee325e37789ff30"
 
 
 @pytest.mark.parametrize("data", [b"", b"<xml/>", b"%PDF-1.4\n%%garbage", b"%PDF-1.7\n1 0 obj\n<<"])
