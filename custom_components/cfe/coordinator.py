@@ -22,8 +22,9 @@ from homeassistant.const import (
     CONF_USERNAME,
     UnitOfEnergy,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -47,6 +48,8 @@ from .mail import MailAuthError, MailError, fetch_new_xml
 from .parser import Bill, BillParseError, parse_bill
 
 _LOGGER = logging.getLogger(__name__)
+
+MORE_DELAY = 60  # seconds before the next poll when Gmail has more new messages
 
 type CfeConfigEntry = ConfigEntry[CfeCoordinator]
 
@@ -77,6 +80,7 @@ class _Fetched:
     attachments: list[tuple[Any, bytes]]  # (message UID or id, XML bytes)
     moved: bool  # the source cursor changed (worth saving)
     commit: Callable[[], None]  # applies the new cursor once bills are handled
+    more: bool = False  # more new messages wait for the next poll
 
 
 def _sort_key(bill: Bill) -> tuple[date, datetime]:
@@ -118,6 +122,7 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
         self._last_uid = 0
         self._gmail_ids: list[str] = []  # Gmail message ids already processed
         self._initial_import_done = False
+        self._unsub_more: CALLBACK_TYPE | None = None
         self._state = CfeData()
 
     async def async_load_store(self) -> bool:
@@ -197,9 +202,15 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
             raise UpdateFailed(f"Gmail unavailable: {err}") from err
 
         def commit() -> None:
-            self._gmail_ids.extend(result.processed_ids)
+            seen = set(self._gmail_ids)
+            for message_id in result.processed_ids:
+                if message_id not in seen:  # concurrent polls can return the same id
+                    seen.add(message_id)
+                    self._gmail_ids.append(message_id)
 
-        return _Fetched(list(result.attachments), bool(result.processed_ids), commit)
+        return _Fetched(
+            list(result.attachments), bool(result.processed_ids), commit, result.more
+        )
 
     async def _async_update_data(self) -> CfeData:
         if self.auth_type == AUTH_GOOGLE:
@@ -238,13 +249,38 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
 
         changed = bool(added) or not self._initial_import_done or fetched.moved
         fetched.commit()
-        self._initial_import_done = True
+        # The first import (auto-paid) lasts until every waiting message was read.
+        self._initial_import_done = self._initial_import_done or not fetched.more
+        if fetched.more:
+            self._async_schedule_more()
         if changed:
             await self._async_save()
         if added:
             _LOGGER.info("Stored %d new CFE bill(s)", len(added))
             self._async_import_statistics()
         return self._snapshot()
+
+    @callback
+    def _async_schedule_more(self) -> None:
+        """Poll again soon: Gmail has more new messages than one poll reads."""
+        if self._unsub_more is not None:
+            self._unsub_more()
+
+        @callback
+        def _poll(_now: datetime) -> None:
+            self._unsub_more = None
+            self.config_entry.async_create_background_task(
+                self.hass, self.async_request_refresh(), f"{DOMAIN} more mail"
+            )
+
+        self._unsub_more = async_call_later(self.hass, MORE_DELAY, _poll)
+
+    async def async_shutdown(self) -> None:
+        """Cancel the pending follow-up poll."""
+        if self._unsub_more is not None:
+            self._unsub_more()
+            self._unsub_more = None
+        await super().async_shutdown()
 
     async def async_mark_paid(self, folio: str, paid: bool = True) -> None:
         """Set the local paid flag for a bill and persist it."""

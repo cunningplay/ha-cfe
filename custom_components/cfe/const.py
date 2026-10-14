@@ -7,6 +7,7 @@ DOMAIN = "cfe"
 CONF_AUTH_TYPE = "auth_type"
 AUTH_IMAP = "imap"  # default: entries from v0.1.0 have no auth_type
 AUTH_GOOGLE = "google"
+CONF_EMAIL = "email"  # Google account of a sign-in entry
 
 CONF_FOLDER = "folder"
 CONF_RPU = "rpu"

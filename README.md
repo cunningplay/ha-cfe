@@ -69,11 +69,19 @@ The integration asks for exactly one scope,
 `https://www.googleapis.com/auth/gmail.readonly`. It searches for messages
 with an `.xml` attachment (`has:attachment filename:xml`, all folders except
 spam and trash) and downloads only those attachments. Each message is read once
-(its id is remembered).
+(its id is remembered). At most 50 new messages are read per poll; if more are
+waiting (e.g. a mailbox with years of bills), the next poll runs a minute later
+until all are read. The account's email address is stored with the entry and
+shown in its title.
 
-If Google rejects the sign-in later (access revoked, token expired), Home
-Assistant asks you to sign in with Google again (reauthentication); the stored
-bills stay visible meanwhile.
+If Google rejects the token or the authorization later (access revoked, refresh
+token expired, Gmail access removed), Home Assistant asks you to sign in with
+Google again (reauthentication), with the same Google account. The stored bills
+stay visible meanwhile.
+
+If the log says **the Gmail API must be enabled in the Google Cloud project**,
+enable it (step 2) for the project that owns the OAuth client; no new sign-in
+is needed.
 
 ### Mail server (IMAP)
 
@@ -150,15 +158,22 @@ bill a baseline. If two bills share a period end, the latest issued one counts.
 
 The mailbox is checked every 6 hours (change it under the integration's
 **Configure**). Call `cfe.refresh` to check now; it fails with an error if the
-mailbox cannot be read.
+check failed before any message was read. If it fails part way, the messages
+read so far are kept (a warning is logged) and the rest are read at the next
+poll.
 
 - IMAP: only messages newer than the last seen UID are fetched (the folder's
   UIDVALIDITY is tracked); on Gmail the search is narrowed to messages with an
   `.xml` attachment. If the login is rejected, Home Assistant asks for a new
   app password (reauth).
 - Google: the Gmail API lists messages with an `.xml` attachment; messages
-  already read are skipped. If the token cannot be refreshed or Gmail answers
-  401/403, Home Assistant asks you to sign in with Google again.
+  already read are skipped, and a message Gmail can no longer serve (deleted,
+  400/404) is logged and skipped. Home Assistant asks you to sign in again only
+  when Google rejects the token (refresh refused, HTTP 401) or the
+  authorization (HTTP 403 for missing permissions). Quota and rate-limit
+  errors, server errors and a token server that is down are retried at the
+  next poll. A disabled Gmail API is logged as an error ("the Gmail API must be
+  enabled in the Google Cloud project") and also retried.
 
 Any other mail error is retried at the next poll while the stored data stays
 visible.

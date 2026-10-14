@@ -246,14 +246,28 @@ KEYS = ("amount_due", "due_date", "cutoff_date", "period_start", "period_end", "
         "daily_energy", "daily_cost", "meter_reading", "tariff", "subsidy", "real_cost", "paid")
 
 
-def token(expires_in=3600, access="at-1"):
-    return {"access_token": access, "refresh_token": "rt-1", "token_type": "Bearer", "scope": SCOPE,
+EMAIL = "bills@example.com"
+
+
+def token(expires_in=3600, access="at-1", scope=SCOPE):
+    return {"access_token": access, "refresh_token": "rt-1", "token_type": "Bearer", "scope": scope,
             "expires_in": expires_in, "expires_at": time.time() + expires_in}
 
 
-def google_entry(expires_in=3600):
-    return MockConfigEntry(domain=DOMAIN, unique_id=RPU, title=f"CFE {RPU}", data={
-        "auth_type": "google", "auth_implementation": DOMAIN, "token": token(expires_in), "rpu": RPU})
+def google_entry(expires_in=3600, email=EMAIL):
+    data = {"auth_type": "google", "auth_implementation": DOMAIN, "token": token(expires_in), "rpu": RPU}
+    if email:
+        data["email"] = email
+    return MockConfigEntry(domain=DOMAIN, unique_id=RPU, title=f"CFE {RPU}", data=data)
+
+
+def google_error(status, reason, api_status="PERMISSION_DENIED"):
+    return {"status": status, "json": {"error": {"code": status, "message": "x", "status": api_status,
+                                                 "errors": [{"reason": reason, "domain": "global"}]}}}
+
+
+def reauth_flows(hass):
+    return [f for f in hass.config_entries.flow.async_progress() if f["context"]["source"] == "reauth"]
 
 
 @pytest.fixture
@@ -286,7 +300,7 @@ def gmail_calls(aioclient_mock, kind):
     return urls
 
 
-async def sign_in(hass, hass_client_no_auth, aioclient_mock, flow_id, result):
+async def sign_in(hass, hass_client_no_auth, aioclient_mock, flow_id, result, email=EMAIL, scope=SCOPE):
     """Follow the external Google step: check the authorize URL, call back, swap the code."""
     assert result["type"] is FlowResultType.EXTERNAL_STEP
     url = URL(result["url"])
@@ -297,7 +311,8 @@ async def sign_in(hass, hass_client_no_auth, aioclient_mock, flow_id, result):
     client = await hass_client_no_auth()
     resp = await client.get(f"/auth/external/callback?code=abcd&state={url.query['state']}")
     assert resp.status == 200
-    aioclient_mock.post(TOKEN_URL, json=token(access="at-new"))
+    aioclient_mock.post(TOKEN_URL, json=token(access="at-new", scope=scope))
+    aioclient_mock.get(f"{GMAIL}/profile", json={"emailAddress": email, "messagesTotal": 3})
     return await hass.config_entries.flow.async_configure(flow_id)
 
 
@@ -313,9 +328,10 @@ async def test_google_flow(hass: HomeAssistant, credentials, hass_client_no_auth
     r = await hass.config_entries.flow.async_configure(r["flow_id"], {"rpu": "0001 1122 2333"})
     await hass.async_block_till_done()
     assert r["type"] is FlowResultType.CREATE_ENTRY
-    assert r["title"] == f"CFE {RPU}" and r["result"].unique_id == RPU
+    assert r["title"] == f"CFE {RPU} ({EMAIL})" and r["result"].unique_id == RPU
     data = r["data"]
     assert data["auth_type"] == "google" and data["rpu"] == RPU and data["auth_implementation"] == DOMAIN
+    assert data["email"] == EMAIL
     assert data["token"]["access_token"] == "at-new" and data["token"]["refresh_token"] == "rt-1"
     assert "password" not in data and "username" not in data
     assert r["result"].state is ConfigEntryState.LOADED
@@ -381,7 +397,7 @@ def stored_bill(hass_storage, e):
 async def test_google_token_revoked_reauth(hass: HomeAssistant, credentials, aioclient_mock, hass_storage,
                                            hass_client_no_auth, current_request_with_host, freezer):
     freezer.move_to("2026-10-13 12:00:00")
-    e = google_entry(expires_in=-60); e.add_to_hass(hass)
+    e = google_entry(expires_in=-60, email=None); e.add_to_hass(hass)  # v0.2.0 dev entry: no email
     stored_bill(hass_storage, e)
     aioclient_mock.post(TOKEN_URL, status=400, json={"error": "invalid_grant"})
     assert await hass.config_entries.async_setup(e.entry_id)
@@ -398,6 +414,7 @@ async def test_google_token_revoked_reauth(hass: HomeAssistant, credentials, aio
     await hass.async_block_till_done()
     assert r["type"] is FlowResultType.ABORT and r["reason"] == "reauth_successful"
     assert e.data["token"]["access_token"] == "at-new" and e.data["rpu"] == RPU and e.data["auth_type"] == "google"
+    assert e.data["email"] == EMAIL  # stored on the first reauth
     assert e.state is ConfigEntryState.LOADED
     assert gmail_calls(aioclient_mock, "attachments") == []  # m1 was already processed
 
@@ -415,7 +432,7 @@ async def test_google_gmail_401_reauth(hass: HomeAssistant, credentials, aioclie
 
 async def test_google_auth_fail_on_first_setup(hass: HomeAssistant, credentials, aioclient_mock):
     e = google_entry(); e.add_to_hass(hass)
-    aioclient_mock.get(f"{GMAIL}/messages", status=403)
+    aioclient_mock.get(f"{GMAIL}/messages", **google_error(403, "insufficientPermissions"))
     await hass.config_entries.async_setup(e.entry_id)
     await hass.async_block_till_done()
     assert e.state is ConfigEntryState.SETUP_ERROR
@@ -447,3 +464,136 @@ async def test_google_options(hass: HomeAssistant, credentials, aioclient_mock):
     await hass.async_block_till_done()
     from datetime import timedelta
     assert e.runtime_data.update_interval == timedelta(hours=24)
+
+
+async def test_google_missing_scope(hass: HomeAssistant, credentials, hass_client_no_auth, aioclient_mock,
+                                    current_request_with_host):
+    r = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    r = await hass.config_entries.flow.async_configure(r["flow_id"], {"next_step_id": "google"})
+    # Gmail unticked on Google's consent screen: only the basic scopes come back
+    r = await sign_in(hass, hass_client_no_auth, aioclient_mock, r["flow_id"], r, scope="openid")
+    assert r["type"] is FlowResultType.ABORT and r["reason"] == "missing_scope"
+    assert gmail_calls(aioclient_mock, "all") == []
+
+
+async def test_google_flow_api_disabled(hass: HomeAssistant, credentials, hass_client_no_auth, aioclient_mock,
+                                        current_request_with_host):
+    aioclient_mock.get(f"{GMAIL}/profile", **google_error(403, "accessNotConfigured"))
+    r = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    r = await hass.config_entries.flow.async_configure(r["flow_id"], {"next_step_id": "google"})
+    r = await sign_in(hass, hass_client_no_auth, aioclient_mock, r["flow_id"], r)
+    assert r["type"] is FlowResultType.ABORT and r["reason"] == "api_disabled"
+
+
+async def test_google_reauth_account_check(hass: HomeAssistant, credentials, hass_client_no_auth, aioclient_mock,
+                                           current_request_with_host):
+    mock_gmail(aioclient_mock, {})
+    e = google_entry(); e.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(e.entry_id)
+    await hass.async_block_till_done()
+    r = await e.start_reauth_flow(hass)
+    assert r["step_id"] == "reauth_google"
+    r = await hass.config_entries.flow.async_configure(r["flow_id"], {})
+    r = await sign_in(hass, hass_client_no_auth, aioclient_mock, r["flow_id"], r, email="someone@else.com")
+    assert r["type"] is FlowResultType.ABORT and r["reason"] == "wrong_account"
+    assert r["description_placeholders"] == {"email": EMAIL}
+    assert e.data["token"]["access_token"] == "at-1"
+    aioclient_mock.clear_requests()
+    mock_gmail(aioclient_mock, {})
+    r = await e.start_reauth_flow(hass)
+    r = await hass.config_entries.flow.async_configure(r["flow_id"], {})
+    r = await sign_in(hass, hass_client_no_auth, aioclient_mock, r["flow_id"], r, email="Bills@Example.com")
+    await hass.async_block_till_done()
+    assert r["type"] is FlowResultType.ABORT and r["reason"] == "reauth_successful"
+    assert e.data["token"]["access_token"] == "at-new"
+
+
+async def test_google_new_message_without_bill_is_saved(hass: HomeAssistant, credentials, aioclient_mock,
+                                                        hass_storage, freezer):
+    freezer.move_to("2026-10-13 12:00:00")
+    e = google_entry(); e.add_to_hass(hass)
+    stored_bill(hass_storage, e)
+    mock_gmail(aioclient_mock, {"m1": XML, "m3": OTHER})
+    assert await hass.config_entries.async_setup(e.entry_id)
+    await hass.async_block_till_done()
+    assert list(e.runtime_data.data.bills) == ["000012345678"]
+    assert gmail_calls(aioclient_mock, "attachments") == [f"{GMAIL}/messages/m3/attachments/att-m3"]
+    assert hass_storage[f"cfe.{e.entry_id}"]["data"]["gmail_ids"] == ["m1", "m3"]
+
+
+async def test_imap_cursor_saved_without_bill(hass: HomeAssistant, hass_storage):
+    e = entry(); e.add_to_hass(hass)
+    hass_storage[f"cfe.{e.entry_id}"] = {"version": 1, "minor_version": 1, "key": f"cfe.{e.entry_id}",
+        "data": {"bills": {}, "paid": {}, "uidvalidity": 7, "last_uid": 2, "initial_import_done": True}}
+    with patch(FETCH, return_value=FetchResult(7, 5, [], [])):
+        assert await hass.config_entries.async_setup(e.entry_id)
+        await hass.async_block_till_done()
+    assert hass_storage[f"cfe.{e.entry_id}"]["data"]["last_uid"] == 5
+
+
+async def test_google_token_server_down(hass: HomeAssistant, credentials, aioclient_mock, hass_storage, freezer):
+    freezer.move_to("2026-10-13 12:00:00")
+    e = google_entry(expires_in=-60); e.add_to_hass(hass)
+    stored_bill(hass_storage, e)
+    aioclient_mock.post(TOKEN_URL, status=503)
+    assert await hass.config_entries.async_setup(e.entry_id)
+    await hass.async_block_till_done()
+    assert e.state is ConfigEntryState.LOADED
+    assert hass.states.get(entity_ids(hass, e)["amount_due"]).state == "1128.28"
+    assert not e.runtime_data.last_update_success
+    assert reauth_flows(hass) == []
+
+
+@pytest.mark.parametrize(("failure", "reauth"), [
+    (google_error(403, "rateLimitExceeded"), False),
+    (google_error(403, "accessNotConfigured"), False),
+    (google_error(403, "insufficientPermissions"), True),
+    (google_error(401, "authError", "UNAUTHENTICATED"), True),
+])
+async def test_google_403_kinds(hass: HomeAssistant, credentials, aioclient_mock, hass_storage, freezer,
+                                caplog, failure, reauth):
+    freezer.move_to("2026-10-13 12:00:00")
+    e = google_entry(); e.add_to_hass(hass)
+    stored_bill(hass_storage, e)
+    aioclient_mock.get(f"{GMAIL}/messages", **failure)
+    assert await hass.config_entries.async_setup(e.entry_id)
+    await hass.async_block_till_done()
+    assert e.state is ConfigEntryState.LOADED
+    assert hass.states.get(entity_ids(hass, e)["amount_due"]).state == "1128.28"
+    assert bool(reauth_flows(hass)) is reauth
+    if failure["json"]["error"]["errors"][0]["reason"] == "accessNotConfigured":
+        assert "Gmail API is not enabled" in caplog.text
+
+
+async def test_google_missing_message_is_recorded(hass: HomeAssistant, credentials, aioclient_mock,
+                                                  hass_storage, freezer):
+    freezer.move_to("2026-09-30 12:00:00")
+    e = google_entry(); e.add_to_hass(hass)
+    aioclient_mock.get(f"{GMAIL}/messages/m1", status=404, json={"error": {"code": 404, "status": "NOT_FOUND"}})
+    mock_gmail(aioclient_mock, {"m1": OTHER, "m2": XML})
+    assert await hass.config_entries.async_setup(e.entry_id)
+    await hass.async_block_till_done()
+    assert list(e.runtime_data.data.bills) == ["000012345678"]
+    assert hass_storage[f"cfe.{e.entry_id}"]["data"]["gmail_ids"] == ["m1", "m2"]
+
+
+async def test_google_per_poll_cap(hass: HomeAssistant, credentials, aioclient_mock, hass_storage, freezer):
+    freezer.move_to("2026-10-13 12:00:00")
+    e = google_entry(); e.add_to_hass(hass)
+    mock_gmail(aioclient_mock, {"m1": OTHER, "m2": NEXT.replace(b"<FECORTE>11 DIC 26</FECORTE>", b"<FECORTE>11 OCT 26</FECORTE>"), "m3": XML})
+    with patch("custom_components.cfe.gmail.MAX_PER_POLL", 2):
+        assert await hass.config_entries.async_setup(e.entry_id)
+        await hass.async_block_till_done()
+        stored = hass_storage[f"cfe.{e.entry_id}"]["data"]
+        assert stored["gmail_ids"] == ["m1", "m2"]  # oldest first; m3 waits
+        assert stored["initial_import_done"] is False
+        assert gmail_calls(aioclient_mock, "attachments")[-1].endswith("/m2/attachments/att-m2")
+        freezer.tick(61)
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+    stored = hass_storage[f"cfe.{e.entry_id}"]["data"]
+    assert stored["gmail_ids"] == ["m1", "m2", "m3"]
+    assert stored["initial_import_done"] is True
+    # bills read in the follow-up poll still count as the first import (auto-paid)
+    assert e.runtime_data.data.is_paid("000012345678")
+    assert sorted(e.runtime_data.data.bills) == ["000012345678", "000012399999"]

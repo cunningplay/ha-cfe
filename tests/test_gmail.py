@@ -24,7 +24,7 @@ class FakeGmail:
         self.attachments: dict[tuple[str, str], bytes] = {}
         self.order: list[str] = []  # newest first, as Gmail lists them
         self.page_size = 500
-        self.fail: dict[str, int | Exception] = {}  # url suffix -> status or error
+        self.fail: dict[str, int | tuple | Exception] = {}  # url suffix -> status, (status, body) or error
         self.calls: list[tuple[str, dict | None]] = []
 
     def add(self, mid: str, parts: list[dict]) -> None:
@@ -38,6 +38,8 @@ class FakeGmail:
             err = self.fail[path]
             if isinstance(err, Exception):
                 raise err
+            if isinstance(err, tuple):
+                return err
             return err, None
         if path == "messages":
             assert params["q"] == "has:attachment filename:xml"
@@ -70,8 +72,13 @@ def client(fake):
     return cfe_gmail.GmailClient(fake)
 
 
-def fetch(fake, known):
-    return asyncio.run(client(fake).fetch_new_xml(known))
+def fetch(fake, known, **kwargs):
+    return asyncio.run(client(fake).fetch_new_xml(known, **kwargs))
+
+
+def google_error(status, reason, api_status="PERMISSION_DENIED"):
+    return status, {"error": {"code": status, "message": "x", "status": api_status,
+                              "errors": [{"reason": reason, "domain": "global"}]}}
 
 
 def downloads(fake) -> list[str]:
@@ -118,11 +125,80 @@ def test_pagination(fake) -> None:
     assert tokens == [None, "2", "4"]
 
 
-@pytest.mark.parametrize("status", [401, 403])
-def test_auth_errors(fake, status) -> None:
-    fake.fail["messages"] = status
+@pytest.mark.parametrize("failure", [
+    401,
+    google_error(401, "authError", "UNAUTHENTICATED"),
+    google_error(403, "insufficientPermissions"),
+    (403, {"error": {"code": 403, "status": "PERMISSION_DENIED",
+                     "details": [{"reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}),
+])
+def test_auth_errors(fake, failure) -> None:
+    fake.fail["messages"] = failure
     with pytest.raises(cfe_gmail.GmailAuthError):
         fetch(fake, [])
+
+
+@pytest.mark.parametrize("failure", [
+    google_error(403, "rateLimitExceeded"),
+    google_error(403, "userRateLimitExceeded"),
+    google_error(403, "dailyLimitExceeded"),
+    google_error(429, "rateLimitExceeded", "RESOURCE_EXHAUSTED"),
+    429,
+    403,  # no body: not known to be an authorization problem
+])
+def test_quota_errors_are_not_auth(fake, failure) -> None:
+    fake.fail["messages"] = failure
+    with pytest.raises(cfe_gmail.GmailError) as err:
+        fetch(fake, [])
+    assert not isinstance(err.value, (cfe_gmail.GmailAuthError, cfe_gmail.GmailApiDisabledError))
+
+
+@pytest.mark.parametrize("failure", [
+    google_error(403, "accessNotConfigured"),
+    (403, {"error": {"code": 403, "status": "PERMISSION_DENIED", "details": [{"reason": "SERVICE_DISABLED"}]}}),
+])
+def test_api_disabled(fake, failure, caplog) -> None:
+    fake.fail["messages"] = failure
+    with pytest.raises(cfe_gmail.GmailApiDisabledError) as err:
+        fetch(fake, [])
+    assert not isinstance(err.value, cfe_gmail.GmailAuthError)
+    assert "Gmail API must be enabled" in str(err.value)
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+@pytest.mark.parametrize("path, failure", [
+    ("messages/m1", 404),
+    ("messages/m1", 400),
+    ("messages/m1/attachments/a1", 404),
+    ("messages/m1", (200, ["not", "a", "dict"])),
+])
+def test_unreadable_message_is_recorded(fake, bill_xml, path, failure) -> None:
+    fake.add("m1", [xml_part("a1")])
+    fake.add("m2", [xml_part("a2")])
+    fake.attachments[("m2", "a2")] = bill_xml
+    fake.fail[path] = failure
+    result = fetch(fake, [])
+    assert result.processed_ids == ["m1", "m2"]
+    assert result.attachments == [("m2", bill_xml)]
+    assert not result.more
+
+
+def test_list_404_raises(fake) -> None:
+    fake.fail["messages"] = 404
+    with pytest.raises(cfe_gmail.GmailError):
+        fetch(fake, [])
+
+
+def test_per_poll_cap(fake) -> None:
+    for i in range(5):
+        fake.add(f"m{i}", [])
+    first = fetch(fake, [], limit=2)
+    assert first.processed_ids == ["m0", "m1"] and first.more
+    second = fetch(fake, first.processed_ids, limit=2)
+    assert second.processed_ids == ["m2", "m3"] and second.more
+    third = fetch(fake, first.processed_ids + second.processed_ids, limit=2)
+    assert third.processed_ids == ["m4"] and not third.more
+    assert cfe_gmail.MAX_PER_POLL == 50
 
 
 def test_auth_error_mid_poll_is_raised(fake, bill_xml) -> None:
@@ -149,6 +225,7 @@ def test_partial_progress_kept(fake, bill_xml) -> None:
     result = fetch(fake, [])
     assert result.processed_ids == ["m1"]
     assert result.attachments == [("m1", bill_xml)]
+    assert result.more
 
 
 def test_failure_with_nothing_processed(fake) -> None:

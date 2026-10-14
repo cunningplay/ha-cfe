@@ -22,7 +22,26 @@ API = "https://gmail.googleapis.com/gmail/v1/users/me"
 QUERY = "has:attachment filename:xml"
 PAGE_SIZE = 500
 MAX_PAGES = 40  # 20 000 messages: a safety stop, not a real limit
+MAX_PER_POLL = 50  # new messages read per poll; the rest wait for the next one
 TIMEOUT = 30
+
+# Google error reasons (error.errors[].reason, error.status, error.details[].reason)
+_AUTH_REASONS = {
+    "authError",
+    "forbidden",
+    "insufficientPermissions",
+    "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+    "UNAUTHENTICATED",
+}
+_QUOTA_REASONS = {
+    "rateLimitExceeded",
+    "userRateLimitExceeded",
+    "dailyLimitExceeded",
+    "quotaExceeded",
+    "RATE_LIMIT_EXCEEDED",
+    "RESOURCE_EXHAUSTED",
+}
+_DISABLED_REASONS = {"accessNotConfigured", "SERVICE_DISABLED"}
 
 type GetJson = Callable[[str, dict[str, str] | None], Awaitable[tuple[int, Any]]]
 
@@ -35,6 +54,14 @@ class GmailAuthError(GmailError):
     """Sign-in expired, revoked or refused (needs reauth)."""
 
 
+class GmailApiDisabledError(GmailError):
+    """The Gmail API is not enabled in the Google Cloud project."""
+
+
+class GmailSkipError(GmailError):
+    """One message or attachment cannot be read (400/404, bad body): skip it."""
+
+
 @dataclass
 class GmailFetchResult:
     """What one poll of the mailbox found."""
@@ -43,10 +70,25 @@ class GmailFetchResult:
     attachments: list[tuple[str, bytes]] = field(default_factory=list)
     # every new message id fully looked at in this poll (with or without XML)
     processed_ids: list[str] = field(default_factory=list)
+    # more new messages are waiting (per-poll cap or a stop part way)
+    more: bool = False
 
 
 def _b64url(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def _reasons(body: Any) -> set[str]:
+    """Reasons from a Google API error body."""
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return set()
+    found = {str(error["status"])} if error.get("status") else set()
+    for key in ("errors", "details"):
+        for item in error.get(key) or []:
+            if isinstance(item, dict) and item.get("reason"):
+                found.add(str(item["reason"]))
+    return found
 
 
 def _xml_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -73,13 +115,36 @@ class GmailClient:
 
     async def _get(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         status, body = await self._get_json(f"{API}/{path}", params)
-        if status in (401, 403):
-            raise GmailAuthError(f"Gmail refused the request (HTTP {status})")
-        if not 200 <= status < 300:
-            raise GmailError(f"Gmail returned HTTP {status}")
-        if not isinstance(body, dict):
-            raise GmailError("Gmail returned an unexpected response")
-        return body
+        if 200 <= status < 300:
+            if not isinstance(body, dict):
+                raise GmailSkipError("Gmail returned an unexpected response")
+            return body
+        reasons = _reasons(body)
+        if status == 401:
+            raise GmailAuthError("Gmail rejected the sign-in (HTTP 401)")
+        if reasons & _DISABLED_REASONS:
+            _LOGGER.error(
+                "The Gmail API is not enabled in the Google Cloud project of the "
+                "OAuth client; enable it in Google Cloud Console (APIs & Services)"
+            )
+            raise GmailApiDisabledError(
+                "The Gmail API must be enabled in the Google Cloud project"
+            )
+        if status == 403 and reasons & _AUTH_REASONS and not reasons & _QUOTA_REASONS:
+            raise GmailAuthError(
+                f"Gmail refused access (HTTP 403: {', '.join(sorted(reasons))})"
+            )
+        if status in (400, 404):
+            raise GmailSkipError(f"Gmail returned HTTP {status}")
+        detail = f": {', '.join(sorted(reasons))}" if reasons else ""
+        raise GmailError(f"Gmail returned HTTP {status}{detail}")
+
+    async def get_email(self) -> str:
+        """The signed-in account's email address."""
+        body = await self._get("profile")
+        if not body.get("emailAddress"):
+            raise GmailError("Gmail profile has no email address")
+        return str(body["emailAddress"])
 
     async def list_message_ids(self) -> list[str]:
         """Ids of every message matching the query, newest first."""
@@ -122,21 +187,29 @@ class GmailClient:
                 found.append(payload)
         return found
 
-    async def fetch_new_xml(self, known_ids: Collection[str]) -> GmailFetchResult:
-        """Fetch .xml attachments from messages not in ``known_ids``.
+    async def fetch_new_xml(
+        self, known_ids: Collection[str], limit: int | None = None
+    ) -> GmailFetchResult:
+        """Fetch .xml attachments from up to ``limit`` messages not in ``known_ids``.
 
-        Each message is fetched once: its id goes into ``processed_ids`` once
-        looked at. If a fetch fails part way, the messages processed so far are
-        returned; GmailError is raised only when nothing was processed.
-        GmailAuthError is always raised.
+        Oldest first. Each message is fetched once: its id goes into
+        ``processed_ids`` once looked at; a message or attachment Gmail cannot
+        serve (400/404, bad body) is recorded as processed with nothing found.
+        If a fetch fails part way, the messages processed so far are returned
+        (``more`` set); GmailError is raised only when nothing was processed.
+        GmailAuthError and GmailApiDisabledError are always raised.
         """
+        limit = MAX_PER_POLL if limit is None else limit
         known = set(known_ids)
         new_ids = [i for i in reversed(await self.list_message_ids()) if i not in known]
-        result = GmailFetchResult()
-        for message_id in new_ids:
+        result = GmailFetchResult(more=len(new_ids) > limit)
+        for message_id in new_ids[:limit]:
             try:
                 payloads = await self._message_xml(message_id)
-            except GmailAuthError:
+            except GmailSkipError as err:
+                _LOGGER.warning("Skipping Gmail message %s: %s", message_id, err)
+                payloads = []
+            except (GmailAuthError, GmailApiDisabledError):
                 raise
             except GmailError as err:
                 if not result.processed_ids:
@@ -147,6 +220,7 @@ class GmailClient:
                     err,
                     len(result.processed_ids),
                 )
+                result.more = True
                 break
             result.attachments.extend((message_id, p) for p in payloads)
             result.processed_ids.append(message_id)
@@ -154,10 +228,16 @@ class GmailClient:
 
 
 def session_get_json(session: Any) -> GetJson:
-    """Build ``get_json`` over a Home Assistant ``OAuth2Session``.
+    """Build ``get_json`` over a Home Assistant ``OAuth2Session`` (refreshes the token)."""
+    return request_get_json(session.async_request)
+
+
+def request_get_json(request: Callable[..., Awaitable[Any]]) -> GetJson:
+    """Build ``get_json`` over ``request(method, url, params=...)`` (aiohttp).
 
     Token refresh refused (revoked or expired sign-in) -> GmailAuthError; other
-    token, network and timeout failures -> GmailError.
+    token, network and timeout failures -> GmailError. Error bodies are kept so
+    the reason can be read.
     """
     # Imported here so the module loads without aiohttp / Home Assistant (unit tests).
     from aiohttp import ClientError
@@ -167,11 +247,15 @@ def session_get_json(session: Any) -> GetJson:
     async def get_json(url: str, params: dict[str, str] | None) -> tuple[int, Any]:
         try:
             async with asyncio.timeout(TIMEOUT):
-                # Refreshes the access token when it is about to expire.
-                resp = await session.async_request("get", url, params=params)
+                resp = await request("get", url, params=params)
                 try:
                     status = resp.status
-                    body = await resp.json(content_type=None) if status < 300 else None
+                    try:
+                        body = await resp.json(content_type=None)
+                    except ValueError:
+                        if status < 300:
+                            raise
+                        body = None
                 finally:
                     resp.release()
         except OAuth2TokenRequestReauthError as err:

@@ -54,7 +54,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: CfeConfigEntry) -> bool:
     """Set up one CFE service (RPU)."""
     gmail = None
     if entry.data.get(CONF_AUTH_TYPE, AUTH_IMAP) == AUTH_GOOGLE:
-        # Raises ConfigEntryNotReady while the Google client is not available.
+        # Deleted application credentials: UnknownImplementationError (auth
+        # failed -> reauth, which offers to add credentials again). A provider
+        # that is temporarily down: ImplementationUnavailableError (not ready).
         implementation = await async_get_config_entry_implementation(hass, entry)
         gmail = GmailClient(session_get_json(OAuth2Session(hass, entry, implementation)))
     coordinator = CfeCoordinator(hass, entry, gmail)

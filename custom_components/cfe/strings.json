@@ -70,7 +70,20 @@
     "abort": {
       "already_configured": "This service number (RPU) is already set up.",
       "reauth_successful": "Access restored. Home Assistant is checking the mailbox again.",
-      "missing_configuration": "Google sign-in is not set up. Add application credentials first (see the integration README)."
+      "missing_configuration": "Google sign-in is not set up. Add application credentials first (see the integration README).",
+      "missing_credentials": "Google sign-in needs application credentials (an OAuth client ID and secret). Add them first.",
+      "authorize_url_timeout": "Timed out creating the Google sign-in link.",
+      "no_url_available": "No Home Assistant URL is available for the sign-in redirect. See [the docs]({docs_url}).",
+      "oauth_error": "Google returned an invalid token.",
+      "oauth_failed": "Could not get a token from Google.",
+      "oauth_timeout": "Timed out getting a token from Google.",
+      "oauth_unauthorized": "Google rejected the client ID or secret.",
+      "user_rejected_authorize": "Google sign-in was cancelled: {error}",
+      "oauth_implementation_unavailable": "The Google sign-in provider is unavailable. Try again later.",
+      "missing_scope": "Gmail access was not granted. Sign in again and allow Home Assistant to view your email messages.",
+      "wrong_account": "Wrong Google account. Sign in with {email}.",
+      "api_disabled": "The Gmail API is not enabled in your Google Cloud project. Enable it in Google Cloud Console, then try again.",
+      "cannot_connect": "Could not reach Gmail. Try again later."
     }
   },
   "options": {

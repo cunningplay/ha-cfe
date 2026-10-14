@@ -28,6 +28,7 @@ from homeassistant.helpers.selector import (
 
 from .const import (
     AUTH_GOOGLE,
+    CONF_EMAIL,
     AUTH_IMAP,
     CONF_AUTH_TYPE,
     CONF_FOLDER,
@@ -43,6 +44,7 @@ from .const import (
     MIN_SCAN_INTERVAL,
 )
 from .coordinator import CfeConfigEntry
+from .gmail import GmailApiDisabledError, GmailClient, GmailError, request_get_json
 from .mail import MailAuthError, MailError, check_login
 
 _LOGGER = logging.getLogger(__name__)
@@ -136,10 +138,33 @@ class CfeConfigFlow(
 
     async def async_oauth_create_entry(self, data: dict[str, Any]) -> ConfigFlowResult:
         """Signed in: update the entry on reauth, else ask for the RPU."""
-        if self.source == SOURCE_REAUTH:
-            return self.async_update_reload_and_abort(
-                self._get_reauth_entry(), data_updates=data
+        token = data["token"]
+        # Google's consent screen lets the user untick Gmail access.
+        if GMAIL_SCOPE not in str(token.get("scope", "")).split():
+            return self.async_abort(reason="missing_scope")
+        client = GmailClient(
+            request_get_json(
+                lambda method, url, **kwargs: config_entry_oauth2_flow.async_oauth2_request(
+                    self.hass, token, method, url, **kwargs
+                )
             )
+        )
+        try:
+            email = await client.get_email()
+        except GmailApiDisabledError:
+            return self.async_abort(reason="api_disabled")
+        except GmailError as err:
+            _LOGGER.warning("Gmail profile check failed: %s", err)
+            return self.async_abort(reason="cannot_connect")
+        data[CONF_EMAIL] = email
+        if self.source == SOURCE_REAUTH:
+            entry = self._get_reauth_entry()
+            stored = entry.data.get(CONF_EMAIL)
+            if stored and stored.lower() != email.lower():
+                return self.async_abort(
+                    reason="wrong_account", description_placeholders={"email": stored}
+                )
+            return self.async_update_reload_and_abort(entry, data_updates=data)
         self._oauth_data = data
         return await self.async_step_rpu()
 
@@ -156,7 +181,7 @@ class CfeConfigFlow(
                 self._abort_if_unique_id_configured()
                 assert self._oauth_data is not None
                 return self.async_create_entry(
-                    title=f"CFE {rpu}",
+                    title=f"CFE {rpu} ({self._oauth_data[CONF_EMAIL]})",
                     data={**self._oauth_data, CONF_AUTH_TYPE: AUTH_GOOGLE, CONF_RPU: rpu},
                 )
         return self.async_show_form(

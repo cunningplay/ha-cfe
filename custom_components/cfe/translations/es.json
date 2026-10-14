@@ -70,7 +70,20 @@
     "abort": {
       "already_configured": "Este número de servicio (RPU) ya está configurado.",
       "reauth_successful": "Acceso restablecido. Home Assistant vuelve a revisar el correo.",
-      "missing_configuration": "El inicio de sesión con Google no está configurado. Primero agrega credenciales de aplicación (ver el README de la integración)."
+      "missing_configuration": "El inicio de sesión con Google no está configurado. Primero agrega credenciales de aplicación (ver el README de la integración).",
+      "missing_credentials": "El inicio de sesión con Google necesita credenciales de aplicación (un ID y secreto de cliente OAuth). Agrégalas primero.",
+      "authorize_url_timeout": "Se agotó el tiempo al crear el enlace de inicio de sesión de Google.",
+      "no_url_available": "No hay una URL de Home Assistant disponible para la redirección del inicio de sesión. Consulta [la documentación]({docs_url}).",
+      "oauth_error": "Google devolvió un token no válido.",
+      "oauth_failed": "No se pudo obtener un token de Google.",
+      "oauth_timeout": "Se agotó el tiempo al obtener un token de Google.",
+      "oauth_unauthorized": "Google rechazó el ID o el secreto del cliente.",
+      "user_rejected_authorize": "Se canceló el inicio de sesión con Google: {error}",
+      "oauth_implementation_unavailable": "El proveedor de inicio de sesión de Google no está disponible. Inténtalo más tarde.",
+      "missing_scope": "No se concedió acceso a Gmail. Vuelve a iniciar sesión y permite que Home Assistant vea tus mensajes de correo.",
+      "wrong_account": "Cuenta de Google equivocada. Inicia sesión con {email}.",
+      "api_disabled": "La API de Gmail no está habilitada en tu proyecto de Google Cloud. Habilítala en Google Cloud Console y vuelve a intentarlo.",
+      "cannot_connect": "No se pudo conectar con Gmail. Inténtalo más tarde."
     }
   },
   "options": {
