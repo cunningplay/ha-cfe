@@ -1,8 +1,19 @@
 {
+  "application_credentials": {
+    "description": "To sign in with Google, create an OAuth client in [Google Cloud Console]({console_url}):\n1. In your project, [enable the Gmail API]({gmail_api_url}). The integration cannot read mail without it.\n1. Set up the [OAuth consent screen]({oauth_consent_url}) and publish the app (In production). Apps left in Testing lose the sign-in after 7 days.\n1. Under [Credentials]({oauth_creds_url}) select **Create credentials** → **OAuth client ID** → **Web application**, with the authorized redirect URI `{redirect_url}`.\n1. Enter the client ID and secret here.\n\nThe integration only asks for read-only Gmail access. More: [README]({more_info_url})."
+  },
   "config": {
     "step": {
       "user": {
         "title": "CFE bills from email",
+        "description": "How should Home Assistant read the email that brings the CFE bills (the CFDI XML attachments)?",
+        "menu_options": {
+          "google": "Google account (sign in)",
+          "imap": "Mail server (IMAP, app password)"
+        }
+      },
+      "imap": {
+        "title": "Mail server (IMAP)",
         "description": "Connect the mailbox that receives the CFE bills (the CFDI XML attachments). For Gmail, use an app password.",
         "data": {
           "host": "IMAP server",
@@ -20,12 +31,35 @@
           "rpu": "The 12-digit RPU printed on the bill."
         }
       },
+      "rpu": {
+        "title": "Service number",
+        "description": "Signed in with Google. Enter the service number of the bills to track.",
+        "data": {
+          "rpu": "Service number (RPU)"
+        },
+        "data_description": {
+          "rpu": "The 12-digit RPU printed on the bill."
+        }
+      },
+      "pick_implementation": {
+        "title": "Pick the Google credentials",
+        "data": {
+          "implementation": "Credentials"
+        }
+      },
+      "auth": {
+        "title": "Sign in with Google"
+      },
       "reauth_confirm": {
         "title": "Mailbox login failed",
         "description": "The mailbox rejected the login for {username}. Enter a new app password.",
         "data": {
           "password": "App password"
         }
+      },
+      "reauth_google": {
+        "title": "Sign in with Google again",
+        "description": "Google no longer accepts the sign-in for the CFE bills (it expired or was revoked). Sign in again to keep reading new bills. Stored bills stay visible meanwhile."
       }
     },
     "error": {
@@ -35,7 +69,8 @@
     },
     "abort": {
       "already_configured": "This service number (RPU) is already set up.",
-      "reauth_successful": "The new app password works."
+      "reauth_successful": "Access restored. Home Assistant is checking the mailbox again.",
+      "missing_configuration": "Google sign-in is not set up. Add application credentials first (see the integration README)."
     }
   },
   "options": {
@@ -50,25 +85,55 @@
   },
   "entity": {
     "sensor": {
-      "amount_due": { "name": "Amount due" },
-      "due_date": { "name": "Due date" },
-      "cutoff_date": { "name": "Cut-off date" },
-      "period_start": { "name": "Period start" },
-      "period_end": { "name": "Period end" },
-      "bill_date": { "name": "Bill date" },
-      "energy": { "name": "Energy" },
-      "daily_energy": { "name": "Daily energy" },
-      "daily_cost": { "name": "Daily cost" },
-      "meter_reading": { "name": "Meter reading" },
-      "tariff": { "name": "Tariff" },
-      "subsidy": { "name": "Government subsidy" },
-      "real_cost": { "name": "Real energy cost" }
+      "amount_due": {
+        "name": "Amount due"
+      },
+      "due_date": {
+        "name": "Due date"
+      },
+      "cutoff_date": {
+        "name": "Cut-off date"
+      },
+      "period_start": {
+        "name": "Period start"
+      },
+      "period_end": {
+        "name": "Period end"
+      },
+      "bill_date": {
+        "name": "Bill date"
+      },
+      "energy": {
+        "name": "Energy"
+      },
+      "daily_energy": {
+        "name": "Daily energy"
+      },
+      "daily_cost": {
+        "name": "Daily cost"
+      },
+      "meter_reading": {
+        "name": "Meter reading"
+      },
+      "tariff": {
+        "name": "Tariff"
+      },
+      "subsidy": {
+        "name": "Government subsidy"
+      },
+      "real_cost": {
+        "name": "Real energy cost"
+      }
     },
     "binary_sensor": {
-      "paid": { "name": "Paid" }
+      "paid": {
+        "name": "Paid"
+      }
     },
     "button": {
-      "mark_paid": { "name": "Mark paid" }
+      "mark_paid": {
+        "name": "Mark paid"
+      }
     }
   },
   "services": {

@@ -7,11 +7,23 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.config_entry_oauth2_flow import (
+    OAuth2Session,
+    async_get_config_entry_implementation,
+)
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
-from .const import DOMAIN, SERVICE_REFRESH, STORAGE_VERSION
+from .const import (
+    AUTH_GOOGLE,
+    AUTH_IMAP,
+    CONF_AUTH_TYPE,
+    DOMAIN,
+    SERVICE_REFRESH,
+    STORAGE_VERSION,
+)
 from .coordinator import CfeConfigEntry, CfeCoordinator
+from .gmail import GmailClient, session_get_json
 
 PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SENSOR]
 
@@ -40,7 +52,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: CfeConfigEntry) -> bool:
     """Set up one CFE service (RPU)."""
-    coordinator = CfeCoordinator(hass, entry)
+    gmail = None
+    if entry.data.get(CONF_AUTH_TYPE, AUTH_IMAP) == AUTH_GOOGLE:
+        # Raises ConfigEntryNotReady while the Google client is not available.
+        implementation = await async_get_config_entry_implementation(hass, entry)
+        gmail = GmailClient(session_get_json(OAuth2Session(hass, entry, implementation)))
+    coordinator = CfeCoordinator(hass, entry, gmail)
     if await coordinator.async_load_store():
         # Stored bills are served at once; mail is checked in the background so
         # HA starts (and the sensors restore) even with no internet.

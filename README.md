@@ -2,7 +2,8 @@
 
 A custom integration that reads CFE (Comisión Federal de Electricidad, Mexico)
 bills from email. CFE has no usable API, but every bill arrives by email with
-its CFDI 4.0 XML. This integration reads the mailbox over IMAP, parses the XML
+its CFDI 4.0 XML. This integration reads the mailbox (Google sign-in with the
+Gmail API, or any mail server over IMAP), parses the XML
 and turns the latest bill into sensors. It also writes each bill's kWh and cost
 into long-term statistics.
 
@@ -26,7 +27,57 @@ Requires Home Assistant 2026.10 or newer.
 
 ## Setup
 
-### 1. Gmail app password
+Settings → Devices & services → Add integration → **CFE**, then choose how the
+bills are read:
+
+- **Google account (sign in)**: sign in with Google; no app password, no
+  2-Step Verification needed. Needs a one-time OAuth client (below).
+- **Mail server (IMAP)**: any mailbox, with a Gmail app password or your
+  provider's IMAP login.
+
+Either way you then enter the RPU (12-digit service number printed on the bill,
+"No. de servicio"). Spaces are removed. One config entry (and one device) per
+RPU. Both methods feed the same sensors, paid flag and statistics.
+
+### Google account sign-in
+
+Home Assistant signs in with your own Google OAuth client (application
+credentials). This is a one-time setup in Google Cloud Console:
+
+1. Open <https://console.cloud.google.com/> and create a project (or pick one).
+2. Enable the **Gmail API** for that project:
+   <https://console.cloud.google.com/apis/library/gmail.googleapis.com>.
+   Without it every request fails.
+3. Set up the **OAuth consent screen** (Google Auth Platform → Branding /
+   Audience): user type *External*, your email as support and developer
+   contact. Under *Audience*, **publish the app** (*In production*). Apps left
+   in *Testing* get refresh tokens that expire after 7 days, so the integration
+   would ask you to sign in again every week.
+4. **Credentials → Create credentials → OAuth client ID → Web application.**
+   Add the authorized redirect URI
+   `https://my.home-assistant.io/redirect/oauth`. Copy the client ID and secret.
+5. In Home Assistant, choose **Google account (sign in)**. The first time, it
+   asks for the client ID and secret (Settings → Devices & services → ⋮ →
+   Application credentials also works). Then sign in with the Google account
+   that receives the bills and allow read-only Gmail access.
+6. Google warns that the app is unverified ("Google hasn't verified this app").
+   That is expected for a personal OAuth client: you are both the developer and
+   the user. Select **Advanced → Go to … (unsafe)** to continue.
+7. Enter the RPU.
+
+The integration asks for exactly one scope,
+`https://www.googleapis.com/auth/gmail.readonly`. It searches for messages
+with an `.xml` attachment (`has:attachment filename:xml`, all folders except
+spam and trash) and downloads only those attachments. Each message is read once
+(its id is remembered).
+
+If Google rejects the sign-in later (access revoked, token expired), Home
+Assistant asks you to sign in with Google again (reauthentication); the stored
+bills stay visible meanwhile.
+
+### Mail server (IMAP)
+
+#### 1. Gmail app password
 
 1. Turn on 2-Step Verification for the Google account that receives the bills.
 2. Open <https://myaccount.google.com/apppasswords>, create an app password
@@ -36,16 +87,16 @@ Requires Home Assistant 2026.10 or newer.
 
 Other providers work too: use their IMAP host and port 993 (SSL).
 
-### 2. Folder
+#### 2. Folder
 
 `INBOX` by default. If a filter moves the bills into a label, enter the label
 name (Gmail labels are IMAP folders, e.g. `CFE`). The folder is opened read-only;
 messages are never moved, deleted or marked as read.
 
-### 3. RPU
+#### 3. RPU
 
 The 12-digit service number printed on the bill ("No. de servicio"/RPU).
-Spaces are removed. One config entry (and one device) per RPU.
+Spaces are removed.
 
 | Field | Default |
 |---|---|
@@ -98,18 +149,30 @@ bill a baseline. If two bills share a period end, the latest issued one counts.
 ## Polling and refresh
 
 The mailbox is checked every 6 hours (change it under the integration's
-**Configure**). Only messages newer than the last seen UID are fetched
-(the folder's UIDVALIDITY is tracked); on Gmail the search is narrowed to
-messages with an `.xml` attachment. Call `cfe.refresh` to check now; it fails with an error if the mailbox cannot be read.
+**Configure**). Call `cfe.refresh` to check now; it fails with an error if the
+mailbox cannot be read.
 
-If the login is rejected, Home Assistant asks for a new app password (reauth).
+- IMAP: only messages newer than the last seen UID are fetched (the folder's
+  UIDVALIDITY is tracked); on Gmail the search is narrowed to messages with an
+  `.xml` attachment. If the login is rejected, Home Assistant asks for a new
+  app password (reauth).
+- Google: the Gmail API lists messages with an `.xml` attachment; messages
+  already read are skipped. If the token cannot be refreshed or Gmail answers
+  401/403, Home Assistant asks you to sign in with Google again.
+
 Any other mail error is retried at the next poll while the stored data stays
 visible.
 
 ## Privacy
 
+- Google sign-in uses the read-only Gmail scope (`gmail.readonly`): the
+  integration can read mail but cannot send, change or delete it, and it never
+  sees your Google password. Home Assistant stores the OAuth token in the
+  config entry. Revoke access any time at
+  <https://myaccount.google.com/permissions>.
 - A Gmail app password grants full access to that mailbox. Use a dedicated
   mailbox for the bills (or forward them to one), not your personal account.
+- Either way, messages are never modified, moved or deleted.
 - Parsed bills, including the customer name and address from the XML, are kept in
   `.storage/cfe.<entry_id>` in the Home Assistant config folder. The file is
   deleted when the integration entry is removed.
@@ -118,10 +181,10 @@ visible.
 ## Development
 
 ```sh
-# Parser and IMAP client (no Home Assistant needed)
+# Parser, IMAP and Gmail clients (no Home Assistant needed)
 uvx --with pytest pytest -q tests
 
-# Home Assistant integration tests (config flow, polling, Store, statistics)
+# Home Assistant integration tests (config flows incl. Google OAuth, polling, Store, statistics)
 uvx -p 3.14 --with pytest-homeassistant-custom-component==0.13.372 \
   pytest -q tests_ha -o asyncio_mode=auto
 ```

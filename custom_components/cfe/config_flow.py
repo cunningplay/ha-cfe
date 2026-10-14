@@ -1,4 +1,4 @@
-"""Config, options and reauth flows for CFE."""
+"""Config, options and reauth flows for CFE (Google sign-in or IMAP)."""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import (
-    ConfigFlow,
+    SOURCE_REAUTH,
     ConfigFlowResult,
     OptionsFlowWithReload,
 )
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -26,6 +27,9 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    AUTH_GOOGLE,
+    AUTH_IMAP,
+    CONF_AUTH_TYPE,
     CONF_FOLDER,
     CONF_RPU,
     CONF_SCAN_INTERVAL,
@@ -34,6 +38,7 @@ from .const import (
     DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    GMAIL_SCOPE,
     MAX_SCAN_INTERVAL,
     MIN_SCAN_INTERVAL,
 )
@@ -43,6 +48,12 @@ from .mail import MailAuthError, MailError, check_login
 _LOGGER = logging.getLogger(__name__)
 
 _RPU_RE = re.compile(r"^\d{12}$")
+
+
+def _clean_rpu(value: str) -> str | None:
+    """The RPU without spaces, or None when it is not 12 digits."""
+    rpu = re.sub(r"\s", "", value)
+    return rpu if _RPU_RE.match(rpu) else None
 
 
 def _user_schema(defaults: Mapping[str, Any]) -> vol.Schema:
@@ -87,12 +98,80 @@ async def _validate(hass: HomeAssistant, data: Mapping[str, Any]) -> str | None:
     return None
 
 
-class CfeConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Set up a CFE service from a mailbox."""
+class CfeConfigFlow(
+    config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=DOMAIN
+):
+    """Set up a CFE service from a mailbox: Google sign-in or IMAP."""
 
+    DOMAIN = DOMAIN
     VERSION = 1
 
+    _oauth_data: dict[str, Any] | None = None
+
+    @property
+    def logger(self) -> logging.Logger:
+        """Logger for the OAuth2 steps."""
+        return _LOGGER
+
+    @property
+    def extra_authorize_data(self) -> dict[str, Any]:
+        """Read-only Gmail scope; offline + consent so a refresh token comes back."""
+        return {
+            "scope": GMAIL_SCOPE,
+            "access_type": "offline",
+            "prompt": "consent",
+        }
+
     async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose how the bills are read."""
+        return self.async_show_menu(step_id="user", menu_options=[AUTH_GOOGLE, AUTH_IMAP])
+
+    async def async_step_google(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Sign in with Google (application credentials, then Google's consent)."""
+        return await self.async_step_pick_implementation()
+
+    async def async_oauth_create_entry(self, data: dict[str, Any]) -> ConfigFlowResult:
+        """Signed in: update the entry on reauth, else ask for the RPU."""
+        if self.source == SOURCE_REAUTH:
+            return self.async_update_reload_and_abort(
+                self._get_reauth_entry(), data_updates=data
+            )
+        self._oauth_data = data
+        return await self.async_step_rpu()
+
+    async def async_step_rpu(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for the service number after a Google sign-in."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if (rpu := _clean_rpu(user_input[CONF_RPU])) is None:
+                errors[CONF_RPU] = "invalid_rpu"
+            else:
+                await self.async_set_unique_id(rpu)
+                self._abort_if_unique_id_configured()
+                assert self._oauth_data is not None
+                return self.async_create_entry(
+                    title=f"CFE {rpu}",
+                    data={**self._oauth_data, CONF_AUTH_TYPE: AUTH_GOOGLE, CONF_RPU: rpu},
+                )
+        return self.async_show_form(
+            step_id="rpu",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_RPU, default=(user_input or {}).get(CONF_RPU, "")
+                    ): str
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_imap(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Ask for the mailbox and the service number (RPU)."""
@@ -109,10 +188,11 @@ class CfeConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = error
                 else:
                     return self.async_create_entry(
-                        title=f"CFE {user_input[CONF_RPU]}", data=user_input
+                        title=f"CFE {user_input[CONF_RPU]}",
+                        data={**user_input, CONF_AUTH_TYPE: AUTH_IMAP},
                     )
         return self.async_show_form(
-            step_id="user",
+            step_id="imap",
             data_schema=_user_schema(user_input or {}),
             errors=errors,
         )
@@ -120,8 +200,21 @@ class CfeConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reauth(
         self, entry_data: Mapping[str, Any]
     ) -> ConfigFlowResult:
-        """Mailbox login was rejected."""
+        """Mailbox login or Google sign-in was rejected."""
+        if entry_data.get(CONF_AUTH_TYPE, AUTH_IMAP) == AUTH_GOOGLE:
+            return await self.async_step_reauth_google()
         return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_google(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Sign in with Google again."""
+        if user_input is None:
+            return self.async_show_form(step_id="reauth_google")
+        entry = self._get_reauth_entry()
+        return await self.async_step_pick_implementation(
+            {"implementation": entry.data["auth_implementation"]}
+        )
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None

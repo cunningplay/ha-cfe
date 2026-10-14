@@ -1,7 +1,8 @@
-"""Coordinator: polls the mailbox, keeps every bill in a local Store."""
+"""Coordinator: polls the mailbox (IMAP or Gmail), keeps every bill in a local Store."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 import logging
@@ -29,6 +30,9 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
 
 from .const import (
+    AUTH_GOOGLE,
+    AUTH_IMAP,
+    CONF_AUTH_TYPE,
     CONF_FOLDER,
     CONF_RPU,
     CONF_SCAN_INTERVAL,
@@ -38,6 +42,7 @@ from .const import (
     DOMAIN,
     STORAGE_VERSION,
 )
+from .gmail import GmailAuthError, GmailClient, GmailError
 from .mail import MailAuthError, MailError, fetch_new_xml
 from .parser import Bill, BillParseError, parse_bill
 
@@ -65,6 +70,15 @@ class CfeData:
         return self.paid.get(folio, False)
 
 
+@dataclass
+class _Fetched:
+    """One poll of a mail source: attachments, plus the cursor update to keep."""
+
+    attachments: list[tuple[Any, bytes]]  # (message UID or id, XML bytes)
+    moved: bool  # the source cursor changed (worth saving)
+    commit: Callable[[], None]  # applies the new cursor once bills are handled
+
+
 def _sort_key(bill: Bill) -> tuple[date, datetime]:
     return (
         bill.period_end or date.min,
@@ -73,12 +87,17 @@ def _sort_key(bill: Bill) -> tuple[date, datetime]:
 
 
 class CfeCoordinator(DataUpdateCoordinator[CfeData]):
-    """Polls IMAP for new CFE bills; serves stored data when mail is down."""
+    """Polls the mailbox for new CFE bills; serves stored data when mail is down."""
 
     config_entry: CfeConfigEntry
 
-    def __init__(self, hass: HomeAssistant, entry: CfeConfigEntry) -> None:
-        """Set up the coordinator for one RPU."""
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: CfeConfigEntry,
+        gmail: GmailClient | None = None,
+    ) -> None:
+        """Set up the coordinator for one RPU (``gmail`` for Google entries)."""
         hours = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         super().__init__(
             hass,
@@ -88,11 +107,16 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
             update_interval=timedelta(hours=hours),
         )
         self.rpu: str = entry.data[CONF_RPU]
+        self.auth_type: str = entry.data.get(CONF_AUTH_TYPE, AUTH_IMAP)
+        if self.auth_type == AUTH_GOOGLE and gmail is None:
+            raise ValueError("A Google entry needs a Gmail client")
+        self._gmail = gmail
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
         )
         self._uidvalidity: int | None = None
         self._last_uid = 0
+        self._gmail_ids: list[str] = []  # Gmail message ids already processed
         self._initial_import_done = False
         self._state = CfeData()
 
@@ -113,6 +137,7 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
         )
         self._uidvalidity = stored.get("uidvalidity")
         self._last_uid = int(stored.get("last_uid") or 0)
+        self._gmail_ids = [str(i) for i in stored.get("gmail_ids") or []]
         self._initial_import_done = bool(stored.get("initial_import_done"))
         self.async_set_updated_data(self._snapshot())
         return True
@@ -127,11 +152,13 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
                 "paid": self._state.paid,
                 "uidvalidity": self._uidvalidity,
                 "last_uid": self._last_uid,
+                "gmail_ids": self._gmail_ids,
                 "initial_import_done": self._initial_import_done,
             }
         )
 
-    async def _async_update_data(self) -> CfeData:
+    async def _async_fetch_imap(self) -> _Fetched:
+        """New XML attachments over IMAP."""
         entry = self.config_entry
         try:
             result = await self.hass.async_add_executor_job(
@@ -149,22 +176,53 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
         except MailError as err:
             raise UpdateFailed(f"Mailbox unavailable: {err}") from err
 
+        def commit() -> None:
+            self._uidvalidity = result.uidvalidity
+            self._last_uid = result.last_uid
+
+        moved = (
+            result.uidvalidity != self._uidvalidity
+            or result.last_uid != self._last_uid
+        )
+        return _Fetched(list(result.attachments), moved, commit)
+
+    async def _async_fetch_gmail(self) -> _Fetched:
+        """New XML attachments over the Gmail API (each message fetched once)."""
+        assert self._gmail is not None
+        try:
+            result = await self._gmail.fetch_new_xml(self._gmail_ids)
+        except GmailAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except GmailError as err:
+            raise UpdateFailed(f"Gmail unavailable: {err}") from err
+
+        def commit() -> None:
+            self._gmail_ids.extend(result.processed_ids)
+
+        return _Fetched(list(result.attachments), bool(result.processed_ids), commit)
+
+    async def _async_update_data(self) -> CfeData:
+        if self.auth_type == AUTH_GOOGLE:
+            fetched = await self._async_fetch_gmail()
+        else:
+            fetched = await self._async_fetch_imap()
+
         today = dt_util.now().date()
         added: list[Bill] = []
-        for uid, payload in result.attachments:
+        for uid, payload in fetched.attachments:
             try:
                 bill = parse_bill(payload)
             except BillParseError as err:
-                _LOGGER.warning("Skipping malformed XML in message UID %s: %s", uid, err)
+                _LOGGER.warning("Skipping malformed XML in message %s: %s", uid, err)
                 continue
             if bill is None:
-                _LOGGER.debug("UID %s: XML is not a CFE bill", uid)
+                _LOGGER.debug("Message %s: XML is not a CFE bill", uid)
                 continue
             if bill.rpu != self.rpu:
-                _LOGGER.debug("UID %s: bill for another service, ignored", uid)
+                _LOGGER.debug("Message %s: bill for another service, ignored", uid)
                 continue
             if bill.folio in self._state.bills:
-                _LOGGER.debug("UID %s: folio %s already stored", uid, bill.folio)
+                _LOGGER.debug("Message %s: folio %s already stored", uid, bill.folio)
                 continue
             self._state.bills[bill.folio] = bill
             added.append(bill)
@@ -178,14 +236,8 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
             ):
                 self._state.paid.setdefault(bill.folio, True)
 
-        changed = (
-            bool(added)
-            or not self._initial_import_done
-            or result.uidvalidity != self._uidvalidity
-            or result.last_uid != self._last_uid
-        )
-        self._uidvalidity = result.uidvalidity
-        self._last_uid = result.last_uid
+        changed = bool(added) or not self._initial_import_done or fetched.moved
+        fetched.commit()
         self._initial_import_done = True
         if changed:
             await self._async_save()

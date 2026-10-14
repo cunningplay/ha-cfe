@@ -1,8 +1,19 @@
 {
+  "application_credentials": {
+    "description": "Para iniciar sesión con Google, crea un cliente OAuth en [Google Cloud Console]({console_url}):\n1. En tu proyecto, [habilita la API de Gmail]({gmail_api_url}). Sin ella la integración no puede leer el correo.\n1. Configura la [pantalla de consentimiento OAuth]({oauth_consent_url}) y publica la app (En producción). Las apps que se quedan en Prueba pierden la sesión a los 7 días.\n1. En [Credenciales]({oauth_creds_url}) elige **Crear credenciales** → **ID de cliente de OAuth** → **Aplicación web**, con el URI de redireccionamiento autorizado `{redirect_url}`.\n1. Escribe aquí el ID y el secreto del cliente.\n\nLa integración solo pide acceso de lectura a Gmail. Más: [README]({more_info_url})."
+  },
   "config": {
     "step": {
       "user": {
         "title": "Recibos de CFE por correo",
+        "description": "¿Cómo debe leer Home Assistant el correo que trae los recibos de CFE (los adjuntos XML del CFDI)?",
+        "menu_options": {
+          "google": "Cuenta de Google (iniciar sesión)",
+          "imap": "Servidor de correo (IMAP, contraseña de aplicación)"
+        }
+      },
+      "imap": {
+        "title": "Servidor de correo (IMAP)",
         "description": "Conecta el buzón que recibe los recibos de CFE (los adjuntos XML del CFDI). En Gmail, usa una contraseña de aplicación.",
         "data": {
           "host": "Servidor IMAP",
@@ -20,12 +31,35 @@
           "rpu": "El RPU de 12 dígitos impreso en el recibo."
         }
       },
+      "rpu": {
+        "title": "Número de servicio",
+        "description": "Sesión de Google iniciada. Escribe el número de servicio de los recibos que quieres seguir.",
+        "data": {
+          "rpu": "Número de servicio (RPU)"
+        },
+        "data_description": {
+          "rpu": "El RPU de 12 dígitos impreso en el recibo."
+        }
+      },
+      "pick_implementation": {
+        "title": "Elige las credenciales de Google",
+        "data": {
+          "implementation": "Credenciales"
+        }
+      },
+      "auth": {
+        "title": "Iniciar sesión con Google"
+      },
       "reauth_confirm": {
         "title": "Falló el inicio de sesión del correo",
         "description": "El buzón rechazó el inicio de sesión de {username}. Escribe una nueva contraseña de aplicación.",
         "data": {
           "password": "Contraseña de aplicación"
         }
+      },
+      "reauth_google": {
+        "title": "Vuelve a iniciar sesión con Google",
+        "description": "Google ya no acepta la sesión para los recibos de CFE (venció o se revocó). Inicia sesión otra vez para seguir leyendo recibos nuevos. Mientras tanto, los recibos guardados siguen visibles."
       }
     },
     "error": {
@@ -35,7 +69,8 @@
     },
     "abort": {
       "already_configured": "Este número de servicio (RPU) ya está configurado.",
-      "reauth_successful": "La nueva contraseña de aplicación funciona."
+      "reauth_successful": "Acceso restablecido. Home Assistant vuelve a revisar el correo.",
+      "missing_configuration": "El inicio de sesión con Google no está configurado. Primero agrega credenciales de aplicación (ver el README de la integración)."
     }
   },
   "options": {
@@ -50,25 +85,55 @@
   },
   "entity": {
     "sensor": {
-      "amount_due": { "name": "Total a pagar" },
-      "due_date": { "name": "Fecha límite de pago" },
-      "cutoff_date": { "name": "Fecha de corte" },
-      "period_start": { "name": "Inicio del periodo" },
-      "period_end": { "name": "Fin del periodo" },
-      "bill_date": { "name": "Fecha del recibo" },
-      "energy": { "name": "Consumo" },
-      "daily_energy": { "name": "Consumo diario" },
-      "daily_cost": { "name": "Costo diario" },
-      "meter_reading": { "name": "Lectura del medidor" },
-      "tariff": { "name": "Tarifa" },
-      "subsidy": { "name": "Aportación gubernamental" },
-      "real_cost": { "name": "Costo real de la energía" }
+      "amount_due": {
+        "name": "Total a pagar"
+      },
+      "due_date": {
+        "name": "Fecha límite de pago"
+      },
+      "cutoff_date": {
+        "name": "Fecha de corte"
+      },
+      "period_start": {
+        "name": "Inicio del periodo"
+      },
+      "period_end": {
+        "name": "Fin del periodo"
+      },
+      "bill_date": {
+        "name": "Fecha del recibo"
+      },
+      "energy": {
+        "name": "Consumo"
+      },
+      "daily_energy": {
+        "name": "Consumo diario"
+      },
+      "daily_cost": {
+        "name": "Costo diario"
+      },
+      "meter_reading": {
+        "name": "Lectura del medidor"
+      },
+      "tariff": {
+        "name": "Tarifa"
+      },
+      "subsidy": {
+        "name": "Aportación gubernamental"
+      },
+      "real_cost": {
+        "name": "Costo real de la energía"
+      }
     },
     "binary_sensor": {
-      "paid": { "name": "Pagado" }
+      "paid": {
+        "name": "Pagado"
+      }
     },
     "button": {
-      "mark_paid": { "name": "Marcar como pagado" }
+      "mark_paid": {
+        "name": "Marcar como pagado"
+      }
     }
   },
   "services": {

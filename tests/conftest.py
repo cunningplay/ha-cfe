@@ -22,6 +22,7 @@ def _load(name: str, path: Path):
 
 cfe_parser = _load("cfe_parser", ROOT / "custom_components" / "cfe" / "parser.py")
 cfe_mail = _load("cfe_mail", ROOT / "custom_components" / "cfe" / "mail.py")
+cfe_gmail = _load("cfe_gmail", ROOT / "custom_components" / "cfe" / "gmail.py")
 
 
 @pytest.fixture

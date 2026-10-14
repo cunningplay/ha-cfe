@@ -3,11 +3,11 @@
   "name": "CFE (Comisión Federal de Electricidad)",
   "codeowners": ["@cunningplay"],
   "config_flow": true,
-  "dependencies": ["recorder"],
+  "dependencies": ["application_credentials", "recorder"],
   "documentation": "https://github.com/cunningplay/ha-cfe",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/cunningplay/ha-cfe/issues",
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.2.0"
 }
