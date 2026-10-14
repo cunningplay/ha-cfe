@@ -8,6 +8,6 @@
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/cunningplay/ha-cfe/issues",
-  "requirements": [],
-  "version": "0.2.0"
+  "requirements": ["pypdf==6.20.1", "fonttools==4.66.1"],
+  "version": "0.3.0"
 }

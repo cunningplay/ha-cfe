@@ -1,4 +1,4 @@
-"""Async Gmail API client that pulls .xml attachments from new messages.
+"""Async Gmail API client that pulls .xml and .pdf attachments from new messages.
 
 Read-only (gmail.readonly scope): mail is never modified. The client works on a
 ``get_json(url, params) -> (status, body)`` callable so this module has no Home
@@ -19,7 +19,7 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 API = "https://gmail.googleapis.com/gmail/v1/users/me"
-QUERY = "has:attachment filename:xml"
+QUERY = "has:attachment (filename:xml OR filename:pdf)"
 PAGE_SIZE = 500
 MAX_PAGES = 40  # 20 000 messages: a safety stop, not a real limit
 MAX_PER_POLL = 50  # new messages read per poll; the rest wait for the next one
@@ -42,6 +42,7 @@ _QUOTA_REASONS = {
     "RESOURCE_EXHAUSTED",
 }
 _DISABLED_REASONS = {"accessNotConfigured", "SERVICE_DISABLED"}
+_KINDS = {".xml": "xml", ".pdf": "pdf"}
 
 type GetJson = Callable[[str, dict[str, str] | None], Awaitable[tuple[int, Any]]]
 
@@ -66,9 +67,9 @@ class GmailSkipError(GmailError):
 class GmailFetchResult:
     """What one poll of the mailbox found."""
 
-    # (message id, attachment bytes) for every .xml attachment found
-    attachments: list[tuple[str, bytes]] = field(default_factory=list)
-    # every new message id fully looked at in this poll (with or without XML)
+    # (message id, "xml" or "pdf", attachment bytes) for every bill attachment
+    attachments: list[tuple[str, str, bytes]] = field(default_factory=list)
+    # every new message id fully looked at in this poll (with or without a bill)
     processed_ids: list[str] = field(default_factory=list)
     # more new messages are waiting (per-poll cap or a stop part way)
     more: bool = False
@@ -91,8 +92,8 @@ def _reasons(body: Any) -> set[str]:
     return found
 
 
-def _xml_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every MIME part (nested ones included) whose filename ends in .xml."""
+def _bill_parts(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """(kind, part) for every MIME part (nested too) named *.xml or *.pdf."""
     found = []
     stack = [payload]
     while stack:
@@ -101,13 +102,14 @@ def _xml_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         stack.extend(part.get("parts") or [])
         filename = str(part.get("filename") or "").strip().lower()
-        if filename.endswith(".xml"):
-            found.append(part)
+        kind = next((k for ext, k in _KINDS.items() if filename.endswith(ext)), None)
+        if kind is not None:
+            found.append((kind, part))
     return found
 
 
 class GmailClient:
-    """Lists messages with .xml attachments and downloads those attachments."""
+    """Lists messages with .xml/.pdf attachments and downloads those attachments."""
 
     def __init__(self, get_json: GetJson) -> None:
         """Wrap a ``get_json`` callable (see :func:`session_get_json`)."""
@@ -165,10 +167,10 @@ class GmailClient:
             _LOGGER.warning("Gmail listing stopped after %d pages", MAX_PAGES)
         return ids
 
-    async def _message_xml(self, message_id: str) -> list[bytes]:
+    async def _message_bills(self, message_id: str) -> list[tuple[str, bytes]]:
         message = await self._get(f"messages/{message_id}", {"format": "full"})
         found = []
-        for part in _xml_parts(message.get("payload") or {}):
+        for kind, part in _bill_parts(message.get("payload") or {}):
             body = part.get("body") or {}
             data = body.get("data")
             if not data and body.get("attachmentId"):
@@ -184,13 +186,13 @@ class GmailClient:
                 _LOGGER.warning("Skipping undecodable attachment in %s: %s", message_id, err)
                 continue
             if payload:
-                found.append(payload)
+                found.append((kind, payload))
         return found
 
     async def fetch_new_xml(
         self, known_ids: Collection[str], limit: int | None = None
     ) -> GmailFetchResult:
-        """Fetch .xml attachments from up to ``limit`` messages not in ``known_ids``.
+        """Fetch .xml/.pdf attachments from up to ``limit`` messages not in ``known_ids``.
 
         Oldest first. Each message is fetched once: its id goes into
         ``processed_ids`` once looked at; a message or attachment Gmail cannot
@@ -205,7 +207,7 @@ class GmailClient:
         result = GmailFetchResult(more=len(new_ids) > limit)
         for message_id in new_ids[:limit]:
             try:
-                payloads = await self._message_xml(message_id)
+                payloads = await self._message_bills(message_id)
             except GmailSkipError as err:
                 _LOGGER.warning("Skipping Gmail message %s: %s", message_id, err)
                 payloads = []
@@ -222,7 +224,7 @@ class GmailClient:
                 )
                 result.more = True
                 break
-            result.attachments.extend((message_id, p) for p in payloads)
+            result.attachments.extend((message_id, k, p) for k, p in payloads)
             result.processed_ids.append(message_id)
         return result
 

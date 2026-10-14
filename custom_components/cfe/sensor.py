@@ -57,6 +57,7 @@ SENSORS: tuple[CfeSensorDescription, ...] = (
         lambda b: b.total,
         attrs_fn=lambda b: {
             "folio": b.folio,
+            "source": b.source,
             "payment_reference": b.payment_reference,
             "invoice_total": b.invoice_total,
             "line_items": [{"name": i.name, "amount": i.amount} for i in b.line_items],
@@ -76,7 +77,8 @@ SENSORS: tuple[CfeSensorDescription, ...] = (
         attrs_fn=lambda b: {
             "days": b.days,
             "tiers": [
-                {"name": t.name, "kwh": t.kwh, "price": t.price} for t in b.tiers
+                {"name": t.name, "kwh": t.kwh, "price": t.price, "subtotal": t.subtotal}
+                for t in b.tiers
             ],
             "history": [
                 {"year": h.year, "month": h.month, "kwh": h.kwh} for h in b.history

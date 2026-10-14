@@ -2,17 +2,50 @@
 
 A custom integration that reads CFE (Comisión Federal de Electricidad, Mexico)
 bills from email. CFE has no usable API, but every bill arrives by email with
-its CFDI 4.0 XML. This integration reads the mailbox (Google sign-in with the
-Gmail API, or any mail server over IMAP), parses the XML
-and turns the latest bill into sensors. It also writes each bill's kWh and cost
-into long-term statistics.
+its CFDI 4.0 XML, its PDF, or both. This integration reads the mailbox (Google
+sign-in with the Gmail API, or any mail server over IMAP), parses the XML (or
+the PDF when there is no XML) and turns the latest bill into sensors. It also
+writes each bill's kWh and cost into long-term statistics.
 
-- Only XML attachments whose issuer RFC is `CFE370814QI0` and whose RPU matches
+- Only bills whose issuer is CFE (RFC `CFE370814QI0`) and whose RPU matches
   the configured service number are used. The sender does not matter, so bills
   forwarded by someone else work too.
 - Each bill is stored locally (keyed by folio). If the mailbox is unreachable,
   the sensors keep showing the stored data.
-- No CFE website login, no captcha, no PDF parsing, no extra Python packages.
+- No CFE website login, no captcha. The PDF reader needs two pure-Python
+  packages, `pypdf` and `fonttools` (Home Assistant installs them).
+
+## XML and PDF bills
+
+The CFDI XML is the preferred source: it carries every field. Paperless CFE
+bills may arrive with only the PDF, so the integration also reads `.pdf`
+attachments:
+
+- **Both in one message**: the XML is used and the PDF is ignored (not even
+  decoded).
+- **PDF first, XML later** (another message, same folio): the XML bill replaces
+  the PDF one. The paid flag is kept.
+- **XML first, PDF later**: the PDF is ignored. A PDF never replaces an XML bill.
+- A PDF that is not a CFE bill, or is for another service number, is ignored.
+  An unreadable or encrypted PDF is skipped with a warning; the message still
+  counts as read.
+
+CFE's PDFs have a broken text layer (the embedded fonts' character maps do not
+match the glyphs), so ordinary copy/paste gives gibberish. The integration
+recognizes each glyph by its outline (a table of Arial outline hashes ships in
+`glyphs.json`; no font data), rebuilds the character maps and reads the text.
+No OCR, nothing is rendered.
+
+A bill read from the PDF has the same amount, dates, period, kWh, tariff,
+meter reading, tiers, line items, payment reference and folio as the XML. It
+has no issue date (*Bill date* stays unknown), no consumption history, daily
+cost, real energy cost or summer season. The *Amount due* sensor's `source`
+attribute says where the bill came from (`xml` or `pdf`). *Government
+subsidy* shows the "Apoyo Gubernamental" amount printed on the PDF, which can
+differ from the XML's `AportacionGub`.
+
+Tip: in Gmail, a filter on `from:cfe.mx has:attachment` can label the bills
+(and, for IMAP, the label can be the folder to read).
 
 ## Install (HACS)
 
@@ -67,8 +100,9 @@ credentials). This is a one-time setup in Google Cloud Console:
 
 The integration asks for exactly one scope,
 `https://www.googleapis.com/auth/gmail.readonly`. It searches for messages
-with an `.xml` attachment (`has:attachment filename:xml`, all folders except
-spam and trash) and downloads only those attachments. Each message is read once
+with an `.xml` or `.pdf` attachment
+(`has:attachment (filename:xml OR filename:pdf)`, all folders except spam and
+trash) and downloads only those attachments. Each message is read once
 (its id is remembered). At most 50 new messages are read per poll; if more are
 waiting (e.g. a mailbox with years of bills), the next poll runs a minute later
 until all are read. The account's email address is stored with the entry and
@@ -121,7 +155,7 @@ One device, `CFE <RPU>`, with:
 
 | Entity | Description |
 |---|---|
-| Amount due | Total to pay (MXN). Attributes: folio, payment reference, line items |
+| Amount due | Total to pay (MXN). Attributes: folio, source (`xml`/`pdf`), payment reference, invoice total, line items |
 | Due date | Payment deadline (`FECLIMITE`) |
 | Cut-off date | Date the service can be cut (`FECORTE`) |
 | Period start / end | Billing period |
@@ -148,7 +182,8 @@ Each bill adds one point at its period end to two external statistics:
 - `cfe:<rpu>_energy` (kWh): the energy billed for the period (`CONSUMO_R`).
 - `cfe:<rpu>_cost` (MXN): the period charge, i.e. the CFDI invoice `Total`
   (energy + IVA + DAP). It is not the amount due, which can include one-off
-  items such as the deposit on a new service.
+  items such as the deposit on a new service. For a bill read from the PDF it
+  is "Fac. del Periodo" + DSAP, the same amount.
 
 Both have a running sum, so they can be used in the Energy dashboard or a
 statistics graph. A zero point at the first bill's period start gives the first
@@ -164,9 +199,9 @@ poll.
 
 - IMAP: only messages newer than the last seen UID are fetched (the folder's
   UIDVALIDITY is tracked); on Gmail the search is narrowed to messages with an
-  `.xml` attachment. If the login is rejected, Home Assistant asks for a new
+  `.xml` or `.pdf` attachment. If the login is rejected, Home Assistant asks for a new
   app password (reauth).
-- Google: the Gmail API lists messages with an `.xml` attachment; messages
+- Google: the Gmail API lists messages with an `.xml` or `.pdf` attachment; messages
   already read are skipped, and a message Gmail can no longer serve (deleted,
   400/404) is logged and skipped. Home Assistant asks you to sign in again only
   when Google rejects the token (refresh refused, HTTP 401) or the
@@ -188,7 +223,7 @@ visible.
 - A Gmail app password grants full access to that mailbox. Use a dedicated
   mailbox for the bills (or forward them to one), not your personal account.
 - Either way, messages are never modified, moved or deleted.
-- Parsed bills, including the customer name and address from the XML, are kept in
+- Parsed bills (from the XML or the PDF) are kept in
   `.storage/cfe.<entry_id>` in the Home Assistant config folder. The file is
   deleted when the integration entry is removed.
 - The password is never logged.
@@ -196,17 +231,27 @@ visible.
 ## Development
 
 ```sh
-# Parser, IMAP and Gmail clients (no Home Assistant needed)
-uvx --with pytest pytest -q tests
+# Parsers (XML, PDF), IMAP and Gmail clients (no Home Assistant needed)
+uvx --with pytest --with pypdf --with fonttools pytest -q tests
 
 # Home Assistant integration tests (config flows incl. Google OAuth, polling, Store, statistics)
 uvx -p 3.14 --with pytest-homeassistant-custom-component==0.13.372 \
   pytest -q tests_ha -o asyncio_mode=auto
 ```
 
-The parser (`custom_components/cfe/parser.py`) has no Home Assistant imports and
-is tested against an anonymized bill in `tests/fixtures/bill_anon.xml`.
-Real bills belong in `samples/`, which is git-ignored and must never be committed.
+The parsers (`custom_components/cfe/parser.py`, `pdfbill.py`) have no Home
+Assistant imports. The XML parser is tested against an anonymized bill in
+`tests/fixtures/bill_anon.xml`, the PDF text parser against an anonymized
+decoded text of the same bill (`tests/fixtures/bill_pdf_text_anon.txt`), and
+the PDF decoder against a synthetic PDF built at test time with a generated
+font. Real bills belong in `samples/`, which is git-ignored and must never be
+committed; when `samples/*.pdf` exist, an extra local test decodes them and
+compares them with the XML of the same bill.
+
+`custom_components/cfe/glyphs.json` (outline hash → character) is generated
+from local Arial fonts (macOS `Arial`, `Arial Bold`, `Arial Black`,
+`Arial Italic`) by `python tools/make_glyph_table.py` (needs fonttools). The
+font files themselves are never committed.
 
 ## License
 

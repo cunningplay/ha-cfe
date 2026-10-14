@@ -1,4 +1,4 @@
-"""Blocking IMAP client that pulls .xml attachments from new messages.
+"""Blocking IMAP client that pulls .xml and .pdf attachments from new messages.
 
 No Home Assistant imports: the coordinator runs these functions in an executor.
 """
@@ -16,6 +16,9 @@ import ssl
 _LOGGER = logging.getLogger(__name__)
 
 TIMEOUT = 30
+# Bill attachment kinds, by filename extension
+KINDS = {".xml": "xml", ".pdf": "pdf"}
+GMAIL_RAW = '"has:attachment (filename:xml OR filename:pdf)"'
 
 
 class MailError(Exception):
@@ -32,8 +35,8 @@ class FetchResult:
 
     uidvalidity: int | None
     last_uid: int
-    # (message UID, attachment bytes) for every .xml attachment found
-    attachments: list[tuple[int, bytes]] = field(default_factory=list)
+    # (message UID, "xml" or "pdf", attachment bytes) for every bill attachment
+    attachments: list[tuple[int, str, bytes]] = field(default_factory=list)
     # every UID looked at in this poll (with or without attachments)
     seen_uids: list[int] = field(default_factory=list)
 
@@ -96,8 +99,14 @@ def check_login(host: str, port: int, user: str, password: str, folder: str) -> 
         _safe_logout(conn)
 
 
-def _xml_attachments(raw: bytes) -> list[bytes]:
-    """Every attachment whose filename ends in .xml (forwarded mail included)."""
+def attachment_kind(filename: str) -> str | None:
+    """``"xml"`` or ``"pdf"`` from an attachment filename, else None."""
+    name = filename.strip().lower()
+    return next((kind for ext, kind in KINDS.items() if name.endswith(ext)), None)
+
+
+def _attachments(raw: bytes) -> list[tuple[str, bytes]]:
+    """(kind, bytes) of every .xml and .pdf attachment (forwarded mail included)."""
     msg = email.message_from_bytes(raw, policy=policy.compat32)
     found = []
     for part in msg.walk():
@@ -107,11 +116,12 @@ def _xml_attachments(raw: bytes) -> list[bytes]:
         if not filename:
             continue
         filename = str(email.header.make_header(email.header.decode_header(filename)))
-        if not filename.strip().lower().endswith(".xml"):
+        kind = attachment_kind(filename)
+        if kind is None:
             continue
         payload = part.get_payload(decode=True)
         if payload:
-            found.append(payload)
+            found.append((kind, payload))
     return found
 
 
@@ -135,11 +145,11 @@ def fetch_new_xml(
     uidvalidity: int | None,
     last_uid: int,
 ) -> FetchResult:
-    """Fetch .xml attachments from messages newer than ``last_uid``.
+    """Fetch .xml and .pdf attachments from messages newer than ``last_uid``.
 
     If the folder's UIDVALIDITY changed, every message is scanned again
     (bills are de-duplicated by folio later, so this is safe). On Gmail only
-    messages with an .xml attachment are searched. If a fetch fails part way,
+    messages with an .xml or .pdf attachment are searched. If a fetch fails part way,
     the messages processed so far are returned (``last_uid`` = the last one
     fully processed); MailError is raised only when nothing was processed.
     """
@@ -153,7 +163,7 @@ def fetch_new_xml(
 
             criteria = [f"UID {last_uid + 1}:*"]
             if _is_gmail(conn):
-                criteria += ["X-GM-RAW", '"filename:xml"']
+                criteria += ["X-GM-RAW", GMAIL_RAW]
             typ, data = conn.uid("SEARCH", None, *criteria)
             if typ != "OK":
                 raise MailError("UID SEARCH failed")
@@ -188,11 +198,11 @@ def fetch_new_xml(
             )
             if raw is not None:
                 try:
-                    payloads = _xml_attachments(raw)
+                    payloads = _attachments(raw)
                 except Exception as err:  # noqa: BLE001 - one bad message must not block the rest
                     _LOGGER.warning("Skipping unreadable message UID %s: %s", uid, err)
                     payloads = []
-                result.attachments.extend((uid, payload) for payload in payloads)
+                result.attachments.extend((uid, kind, data) for kind, data in payloads)
             result.seen_uids.append(uid)
             result.last_uid = uid
         return result

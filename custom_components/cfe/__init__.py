@@ -1,4 +1,4 @@
-"""CFE bills from emailed CFDI XML."""
+"""CFE bills from email (CFDI XML, or the PDF when there is no XML)."""
 
 from __future__ import annotations
 

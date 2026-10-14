@@ -46,6 +46,7 @@ from .const import (
 from .gmail import GmailAuthError, GmailClient, GmailError
 from .mail import MailAuthError, MailError, fetch_new_xml
 from .parser import Bill, BillParseError, parse_bill
+from .pdfbill import parse_pdf_bill
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ class CfeData:
 class _Fetched:
     """One poll of a mail source: attachments, plus the cursor update to keep."""
 
-    attachments: list[tuple[Any, bytes]]  # (message UID or id, XML bytes)
+    attachments: list[tuple[Any, str, bytes]]  # (message UID or id, kind, bytes)
     moved: bool  # the source cursor changed (worth saving)
     commit: Callable[[], None]  # applies the new cursor once bills are handled
     more: bool = False  # more new messages wait for the next poll
@@ -163,7 +164,7 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
         )
 
     async def _async_fetch_imap(self) -> _Fetched:
-        """New XML attachments over IMAP."""
+        """New bill attachments (XML, PDF) over IMAP."""
         entry = self.config_entry
         try:
             result = await self.hass.async_add_executor_job(
@@ -192,7 +193,7 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
         return _Fetched(list(result.attachments), moved, commit)
 
     async def _async_fetch_gmail(self) -> _Fetched:
-        """New XML attachments over the Gmail API (each message fetched once)."""
+        """New bill attachments over the Gmail API (each message fetched once)."""
         assert self._gmail is not None
         try:
             result = await self._gmail.fetch_new_xml(self._gmail_ids)
@@ -220,32 +221,20 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
 
         today = dt_util.now().date()
         added: list[Bill] = []
-        for uid, payload in fetched.attachments:
-            try:
-                bill = parse_bill(payload)
-            except BillParseError as err:
-                _LOGGER.warning("Skipping malformed XML in message %s: %s", uid, err)
-                continue
-            if bill is None:
-                _LOGGER.debug("Message %s: XML is not a CFE bill", uid)
-                continue
-            if bill.rpu != self.rpu:
-                _LOGGER.debug("Message %s: bill for another service, ignored", uid)
-                continue
-            if bill.folio in self._state.bills:
-                _LOGGER.debug("Message %s: folio %s already stored", uid, bill.folio)
-                continue
-            self._state.bills[bill.folio] = bill
-            added.append(bill)
-            # First import: anything already past its cut-off was paid (an
-            # unpaid bill past cut-off on a new service means the power is cut).
-            deadline = bill.cutoff_date or bill.due_date or bill.period_end
-            if (
-                not self._initial_import_done
-                and deadline is not None
-                and deadline < today
-            ):
-                self._state.paid.setdefault(bill.folio, True)
+        for uid, bills in (await self._async_parse(fetched.attachments)).items():
+            for bill in bills:
+                if not self._store_bill(uid, bill):
+                    continue
+                added.append(bill)
+                # First import: anything already past its cut-off was paid (an
+                # unpaid bill past cut-off on a new service means the power is cut).
+                deadline = bill.cutoff_date or bill.due_date or bill.period_end
+                if (
+                    not self._initial_import_done
+                    and deadline is not None
+                    and deadline < today
+                ):
+                    self._state.paid.setdefault(bill.folio, True)
 
         changed = bool(added) or not self._initial_import_done or fetched.moved
         fetched.commit()
@@ -259,6 +248,71 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
             _LOGGER.info("Stored %d new CFE bill(s)", len(added))
             self._async_import_statistics()
         return self._snapshot()
+
+    async def _async_parse(
+        self, attachments: list[tuple[Any, str, bytes]]
+    ) -> dict[Any, list[Bill]]:
+        """Bills for this RPU per message (message order kept).
+
+        Within a message, an XML bill wins: the PDFs are read only when no
+        XML attachment of the message is a CFE bill (for any service).
+        """
+        messages: dict[Any, list[tuple[str, bytes]]] = {}
+        for uid, kind, payload in attachments:
+            messages.setdefault(uid, []).append((kind, payload))
+        found: dict[Any, list[Bill]] = {}
+        for uid, parts in messages.items():
+            bills = [
+                b for k, p in parts if k == "xml" and (b := self._parse_xml(uid, p))
+            ]
+            if not bills:
+                for kind, payload in parts:
+                    if kind == "pdf" and (bill := await self._async_parse_pdf(uid, payload)):
+                        bills.append(bill)
+            found[uid] = [b for b in bills if self._for_this_service(uid, b)]
+        return found
+
+    def _parse_xml(self, uid: Any, payload: bytes) -> Bill | None:
+        try:
+            bill = parse_bill(payload)
+        except BillParseError as err:
+            _LOGGER.warning("Skipping malformed XML in message %s: %s", uid, err)
+            return None
+        if bill is None:
+            _LOGGER.debug("Message %s: XML is not a CFE bill", uid)
+        return bill
+
+    def _for_this_service(self, uid: Any, bill: Bill) -> bool:
+        if bill.rpu != self.rpu:
+            _LOGGER.debug("Message %s: bill for another service, ignored", uid)
+            return False
+        return True
+
+    async def _async_parse_pdf(self, uid: Any, payload: bytes) -> Bill | None:
+        try:
+            bill = await self.hass.async_add_executor_job(
+                parse_pdf_bill, payload, self.rpu
+            )
+        except BillParseError as err:
+            _LOGGER.warning("Skipping unreadable PDF in message %s: %s", uid, err)
+            return None
+        except Exception:  # noqa: BLE001 - one odd PDF must not stop the poll
+            _LOGGER.warning("Skipping PDF in message %s: cannot decode", uid, exc_info=True)
+            return None
+        if bill is None:
+            _LOGGER.debug("Message %s: PDF is not a CFE bill for this service", uid)
+        return bill
+
+    def _store_bill(self, uid: Any, bill: Bill) -> bool:
+        """Store a new bill. True if stored (new, or an XML replacing a PDF)."""
+        stored = self._state.bills.get(bill.folio)
+        if stored is not None and not (stored.source == "pdf" and bill.source == "xml"):
+            _LOGGER.debug("Message %s: folio %s already stored", uid, bill.folio)
+            return False
+        if stored is not None:
+            _LOGGER.info("Folio %s: XML bill replaces the one read from the PDF", bill.folio)
+        self._state.bills[bill.folio] = bill
+        return True
 
     @callback
     def _async_schedule_more(self) -> None:

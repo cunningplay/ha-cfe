@@ -1,5 +1,7 @@
 """Parse CFE (Comisión Federal de Electricidad) CFDI 4.0 bill XML.
 
+The :class:`Bill` dataclass is shared with ``pdfbill`` (bills read from the PDF).
+
 Pure module: no Home Assistant imports, so it can be unit-tested on its own.
 Every field is optional; a missing or odd value gives None, never a crash.
 """
@@ -35,7 +37,7 @@ _SPANISH_DATE = re.compile(r"^\s*(\d{1,2})\s+([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{2}|
 
 
 class BillParseError(ValueError):
-    """The attachment is not well-formed XML."""
+    """The attachment cannot be read (malformed XML, broken or encrypted PDF)."""
 
 
 @dataclass
@@ -53,6 +55,7 @@ class Tier:
     name: str | None
     kwh: float | None
     price: float | None
+    subtotal: float | None = None  # PDF only (kWh x price)
 
 
 @dataclass
@@ -94,6 +97,7 @@ class Bill:
     summer_start: str | None = None
     summer_end: str | None = None
     history: list[HistoryPoint] = field(default_factory=list)
+    source: str = "xml"  # "xml" (CFDI) or "pdf" (read from the printed bill)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-safe primitives (dates as ISO strings)."""
@@ -119,6 +123,8 @@ class Bill:
             values["issued"] = None
         values["line_items"] = [LineItem(**i) for i in values.get("line_items") or []]
         values["tiers"] = [Tier(**t) for t in values.get("tiers") or []]
+        if values.get("source") not in ("xml", "pdf"):
+            values["source"] = "xml"  # stored before v0.3.0: always XML
         values["history"] = [HistoryPoint(**h) for h in values.get("history") or []]
         return cls(**values)
 

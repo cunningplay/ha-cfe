@@ -148,7 +148,7 @@ def test_round_trip(bill_xml: bytes) -> None:
     assert cfe_parser.Bill.from_dict(bill.to_dict()) == bill
 
 
-def test_mail_finds_forwarded_xml_attachment(bill_xml: bytes) -> None:
+def test_mail_finds_forwarded_bill_attachments(bill_xml: bytes) -> None:
     from email.message import EmailMessage
 
     inner = EmailMessage()
@@ -160,8 +160,8 @@ def test_mail_finds_forwarded_xml_attachment(bill_xml: bytes) -> None:
     outer["Subject"] = "Fwd: Recibo CFE"
     outer.set_content("fwd")
     outer.add_attachment(inner)
-    found = cfe_mail._xml_attachments(outer.as_bytes())
-    assert found == [bill_xml]
+    found = cfe_mail._attachments(outer.as_bytes())
+    assert found == [("xml", bill_xml), ("pdf", b"%PDF")]
 
 
 def test_non_finite_numbers_give_none(bill_xml: bytes) -> None:

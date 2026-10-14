@@ -100,7 +100,7 @@ async def test_flow_errors(hass: HomeAssistant):
 async def test_bill_flow(hass: HomeAssistant, freezer: FrozenDateTimeFactory, hass_storage):
     freezer.move_to("2026-09-30 12:00:00")
     other = XML.replace(RPU.encode(), b"999999999999").replace(b'Folio="000012345678"', b'Folio="2"')
-    res = FetchResult(7, 12, [(10, XML), (11, XML), (11, other), (12, b"<bad")], [10, 11, 12])
+    res = FetchResult(7, 12, [(10, "xml", XML), (11, "xml", XML), (11, "xml", other), (12, "xml", b"<bad")], [10, 11, 12])
     e = entry(); e.add_to_hass(hass)
     with patch(FETCH, return_value=res) as m:
         assert await hass.config_entries.async_setup(e.entry_id)
@@ -161,7 +161,7 @@ async def test_restore_offline(hass: HomeAssistant, hass_storage, freezer):
 async def test_first_import_overdue_paid(hass: HomeAssistant, freezer):
     freezer.move_to("2026-10-13 12:00:00")
     e = entry(); e.add_to_hass(hass)
-    with patch(FETCH, return_value=FetchResult(1, 3, [(3, XML)], [3])):
+    with patch(FETCH, return_value=FetchResult(1, 3, [(3, "xml", XML)], [3])):
         assert await hass.config_entries.async_setup(e.entry_id)
         await hass.async_block_till_done()
     assert e.runtime_data.data.is_paid("000012345678")
@@ -199,7 +199,7 @@ async def test_overdue_after_initial_import_stays_unpaid(hass: HomeAssistant, ha
     e = entry(); e.add_to_hass(hass)
     hass_storage[f"cfe.{e.entry_id}"] = {"version": 1, "minor_version": 1, "key": f"cfe.{e.entry_id}",
         "data": {"bills": {}, "paid": {}, "uidvalidity": 7, "last_uid": 2, "initial_import_done": True}}
-    with patch(FETCH, return_value=FetchResult(7, 3, [(3, XML)], [3])):
+    with patch(FETCH, return_value=FetchResult(7, 3, [(3, "xml", XML)], [3])):
         assert await hass.config_entries.async_setup(e.entry_id)
         await hass.async_block_till_done()
     assert list(e.runtime_data.data.bills) == ["000012345678"]
@@ -209,7 +209,7 @@ async def test_overdue_after_initial_import_stays_unpaid(hass: HomeAssistant, ha
 async def test_two_bills_reverse_order(hass: HomeAssistant, freezer):
     freezer.move_to("2026-11-27 12:00:00")
     e = entry(); e.add_to_hass(hass)
-    with patch(FETCH, return_value=FetchResult(7, 2, [(1, NEXT), (2, XML)], [1, 2])):
+    with patch(FETCH, return_value=FetchResult(7, 2, [(1, "xml", NEXT), (2, "xml", XML)], [1, 2])):
         assert await hass.config_entries.async_setup(e.entry_id)
         await hass.async_block_till_done()
     ids = entity_ids(hass, e)
@@ -226,7 +226,7 @@ async def test_two_bills_reverse_order(hass: HomeAssistant, freezer):
 
 async def test_remove_entry_deletes_store(hass: HomeAssistant, hass_storage):
     e = entry(); e.add_to_hass(hass)
-    with patch(FETCH, return_value=FetchResult(7, 3, [(3, XML)], [3])):
+    with patch(FETCH, return_value=FetchResult(7, 3, [(3, "xml", XML)], [3])):
         assert await hass.config_entries.async_setup(e.entry_id)
         await hass.async_block_till_done()
     assert f"cfe.{e.entry_id}" in hass_storage
@@ -281,12 +281,13 @@ def b64(data: bytes) -> str:
 
 
 def mock_gmail(aioclient_mock, messages: dict[str, bytes]):
-    """Gmail with one message (and one .xml attachment) per entry; listed newest first."""
+    """Gmail with one message (an .xml and a junk .pdf attachment) per entry; listed newest first."""
     for mid, xml in messages.items():
+        aioclient_mock.get(f"{GMAIL}/messages/{mid}/attachments/pdf-{mid}", json={"size": 9, "data": b64(b"%PDF junk")})
         aioclient_mock.get(f"{GMAIL}/messages/{mid}/attachments/att-{mid}", json={"size": len(xml), "data": b64(xml)})
         aioclient_mock.get(f"{GMAIL}/messages/{mid}", json={"id": mid, "payload": {"mimeType": "multipart/mixed", "parts": [
             {"partId": "0", "mimeType": "text/html", "filename": "", "body": {"size": 10}},
-            {"partId": "1", "mimeType": "application/pdf", "filename": "recibo.pdf", "body": {"attachmentId": "pdf", "size": 9}},
+            {"partId": "1", "mimeType": "application/pdf", "filename": "recibo.pdf", "body": {"attachmentId": f"pdf-{mid}", "size": 9}},
             {"partId": "2", "mimeType": "text/xml", "filename": f"{mid}.xml", "body": {"attachmentId": f"att-{mid}", "size": len(xml)}},
         ]}})
     aioclient_mock.get(f"{GMAIL}/messages", json={
@@ -364,7 +365,8 @@ async def test_google_poll_matches_imap(hass: HomeAssistant, credentials, aiocli
     await hass.async_block_till_done()
     assert e.state is ConfigEntryState.LOADED
     assert list(e.runtime_data.data.bills) == ["000012345678"]  # the other RPU's XML is ignored
-    assert len(gmail_calls(aioclient_mock, "attachments")) == 2  # the PDF is never downloaded
+    # the PDFs are downloaded, then ignored: each message has a CFE XML bill (XML wins)
+    assert len(gmail_calls(aioclient_mock, "attachments")) == 4
     for call in aioclient_mock.mock_calls:
         if str(call[1]).startswith(GMAIL):
             assert call[3]["Authorization"] == "Bearer at-1"
@@ -374,12 +376,13 @@ async def test_google_poll_matches_imap(hass: HomeAssistant, credentials, aiocli
     # later poll, no new messages: only the listing, no message or attachment fetch
     before = len(gmail_calls(aioclient_mock, "all"))
     await hass.services.async_call(DOMAIN, "refresh", blocking=True)
-    assert gmail_calls(aioclient_mock, "all")[before:] == [f"{GMAIL}/messages?q=has:attachment+filename:xml&maxResults=500"]
+    assert gmail_calls(aioclient_mock, "all")[before:] == [
+        f"{GMAIL}/messages?q=has:attachment+(filename:xml+OR+filename:pdf)&maxResults=500"]
     # same XML over IMAP: same sensor values
     assert await hass.config_entries.async_remove(e.entry_id)
     await hass.async_block_till_done()
     i = entry(); i.add_to_hass(hass)
-    with patch(FETCH, return_value=FetchResult(7, 2, [(1, XML), (2, OTHER)], [1, 2])):
+    with patch(FETCH, return_value=FetchResult(7, 2, [(1, "xml", XML), (2, "xml", OTHER)], [1, 2])):
         assert await hass.config_entries.async_setup(i.entry_id)
         await hass.async_block_till_done()
     assert await states(hass, i) == google_states
@@ -517,7 +520,8 @@ async def test_google_new_message_without_bill_is_saved(hass: HomeAssistant, cre
     assert await hass.config_entries.async_setup(e.entry_id)
     await hass.async_block_till_done()
     assert list(e.runtime_data.data.bills) == ["000012345678"]
-    assert gmail_calls(aioclient_mock, "attachments") == [f"{GMAIL}/messages/m3/attachments/att-m3"]
+    assert gmail_calls(aioclient_mock, "attachments") == [
+        f"{GMAIL}/messages/m3/attachments/pdf-m3", f"{GMAIL}/messages/m3/attachments/att-m3"]
     assert hass_storage[f"cfe.{e.entry_id}"]["data"]["gmail_ids"] == ["m1", "m3"]
 
 
@@ -588,6 +592,7 @@ async def test_google_per_poll_cap(hass: HomeAssistant, credentials, aioclient_m
         assert stored["gmail_ids"] == ["m1", "m2"]  # oldest first; m3 waits
         assert stored["initial_import_done"] is False
         assert gmail_calls(aioclient_mock, "attachments")[-1].endswith("/m2/attachments/att-m2")
+        assert not any("/m3/" in u for u in gmail_calls(aioclient_mock, "attachments"))
         freezer.tick(61)
         async_fire_time_changed(hass)
         await hass.async_block_till_done()
@@ -597,3 +602,131 @@ async def test_google_per_poll_cap(hass: HomeAssistant, credentials, aioclient_m
     # bills read in the follow-up poll still count as the first import (auto-paid)
     assert e.runtime_data.data.is_paid("000012345678")
     assert sorted(e.runtime_data.data.bills) == ["000012345678", "000012399999"]
+
+
+# ---------------------------------------------------------------- PDF bills (v0.3.0)
+
+PDF_TEXT = (Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "bill_pdf_text_anon.txt").read_text(encoding="utf-8")
+PDF = b"%PDF-1.7 fake CFE bill"  # decodes to PDF_TEXT (pdf_text patched)
+PDF_OTHER = b"%PDF-1.7 fake bill for another RPU"
+PDF_FOREIGN = b"%PDF-1.7 fake bill from another company"
+
+
+@pytest.fixture
+def fake_pdf_text():
+    """pdf_text: the known fake PDFs give decoded text; anything else goes to the real decoder."""
+    from custom_components.cfe import pdfbill
+
+    real = pdfbill.pdf_text
+    texts = {
+        PDF: PDF_TEXT,
+        PDF_OTHER: PDF_TEXT.replace(RPU, "999999999999"),
+        PDF_FOREIGN: PDF_TEXT.replace("Comisión Federal de Electricidad", "Otra").replace("CFE 370814QI0", "X"),
+    }
+    with patch.object(pdfbill, "pdf_text", side_effect=lambda data: texts[data] if data in texts else real(data)) as m:
+        yield m
+
+
+async def setup_imap(hass, attachments, uids, last_uid=None, stored=None, hass_storage=None):
+    e = entry(); e.add_to_hass(hass)
+    if stored is not None:
+        hass_storage[f"cfe.{e.entry_id}"] = stored(e)
+    with patch(FETCH, return_value=FetchResult(7, last_uid or max(uids), attachments, uids)):
+        assert await hass.config_entries.async_setup(e.entry_id)
+        await hass.async_block_till_done()
+    return e
+
+
+async def test_pdf_only(hass: HomeAssistant, freezer, fake_pdf_text, hass_storage):
+    freezer.move_to("2026-09-30 12:00:00")
+    e = await setup_imap(hass, [(3, "pdf", PDF)], [3])
+    bill = e.runtime_data.data.bills["000012345678"]
+    assert bill.source == "pdf"
+    ids = entity_ids(hass, e)
+    st = hass.states.get(ids["amount_due"])
+    assert st.state == "1128.28" and st.attributes["source"] == "pdf"
+    assert st.attributes["invoice_total"] == 449.28
+    assert st.attributes["payment_reference"] == "01 000111222333 261009 000001128 5"
+    assert [i["name"] for i in st.attributes["line_items"]][-1] == "Total"
+    assert hass.states.get(ids["due_date"]).state == "2026-10-09"
+    assert hass.states.get(ids["cutoff_date"]).state == "2026-10-10"
+    assert hass.states.get(ids["period_start"]).state == "2026-08-28"
+    assert hass.states.get(ids["period_end"]).state == "2026-09-23"
+    assert hass.states.get(ids["energy"]).state == "174.0"
+    assert hass.states.get(ids["tariff"]).state == "1A"
+    assert hass.states.get(ids["meter_reading"]).state == "174"
+    assert hass_storage[f"cfe.{e.entry_id}"]["data"]["bills"]["000012345678"]["source"] == "pdf"
+    # statistics: same period charge as the XML (Fac. del Periodo + DSAP)
+    stats = await get_stats(hass)
+    assert [r["sum"] for r in stats[f"cfe:{RPU}_energy"]] == [0.0, 174.0]
+    assert [r["sum"] for r in stats[f"cfe:{RPU}_cost"]] == [0.0, 449.28]
+
+
+async def test_pdf_and_xml_same_message(hass: HomeAssistant, freezer, fake_pdf_text):
+    freezer.move_to("2026-09-30 12:00:00")
+    e = await setup_imap(hass, [(3, "pdf", PDF), (3, "xml", XML)], [3])
+    assert e.runtime_data.data.bills["000012345678"].source == "xml"
+    fake_pdf_text.assert_not_called()  # the PDF is not even decoded
+    assert hass.states.get(entity_ids(hass, e)["amount_due"]).attributes["source"] == "xml"
+
+
+async def test_pdf_then_xml_replaces_keeps_paid(hass: HomeAssistant, freezer, fake_pdf_text, hass_storage):
+    freezer.move_to("2026-09-30 12:00:00")
+    e = await setup_imap(hass, [(3, "pdf", PDF)], [3])
+    ids = entity_ids(hass, e)
+    await hass.services.async_call("button", "press", {"entity_id": ids["mark_paid"]}, blocking=True)
+    with patch(FETCH, return_value=FetchResult(7, 4, [(4, "xml", XML)], [4])):
+        await hass.services.async_call(DOMAIN, "refresh", blocking=True)
+    await hass.async_block_till_done()
+    bill = e.runtime_data.data.bills["000012345678"]
+    assert bill.source == "xml" and bill.issued is not None  # XML-only fields now present
+    assert hass.states.get(ids["paid"]).state == "on"
+    assert hass.states.get(ids["amount_due"]).attributes["source"] == "xml"
+    assert hass_storage[f"cfe.{e.entry_id}"]["data"]["bills"]["000012345678"]["source"] == "xml"
+
+
+async def test_xml_then_pdf_ignored(hass: HomeAssistant, freezer, fake_pdf_text, hass_storage):
+    freezer.move_to("2026-09-30 12:00:00")
+    e = await setup_imap(hass, [(3, "xml", XML), (4, "pdf", PDF)], [3, 4])
+    assert e.runtime_data.data.bills["000012345678"].source == "xml"
+    assert fake_pdf_text.call_count == 1  # decoded (another message), then ignored
+    with patch(FETCH, return_value=FetchResult(7, 5, [(5, "pdf", PDF)], [5])):
+        await hass.services.async_call(DOMAIN, "refresh", blocking=True)
+    assert e.runtime_data.data.bills["000012345678"].source == "xml"
+    assert hass_storage[f"cfe.{e.entry_id}"]["data"]["bills"]["000012345678"]["source"] == "xml"
+
+
+async def test_other_pdfs_ignored(hass: HomeAssistant, freezer, fake_pdf_text, hass_storage):
+    freezer.move_to("2026-09-30 12:00:00")
+    e = await setup_imap(hass, [(3, "pdf", PDF_OTHER), (4, "pdf", PDF_FOREIGN)], [3, 4])
+    assert e.runtime_data.data.bills == {}
+    assert hass_storage[f"cfe.{e.entry_id}"]["data"]["last_uid"] == 4
+
+
+async def test_broken_pdf_skipped(hass: HomeAssistant, freezer, fake_pdf_text, hass_storage, caplog):
+    freezer.move_to("2026-09-30 12:00:00")
+    from pypdf import PdfWriter
+    import io
+
+    writer = PdfWriter(); writer.add_blank_page(100, 100); writer.encrypt("secret")
+    encrypted = io.BytesIO(); writer.write(encrypted)
+    e = await setup_imap(hass, [(3, "pdf", b"%PDF-1.4 broken"), (4, "pdf", encrypted.getvalue()),
+                                (5, "pdf", PDF)], [3, 4, 5])
+    assert "Skipping unreadable PDF in message 3" in caplog.text
+    assert "Skipping unreadable PDF in message 4" in caplog.text and "encrypted" in caplog.text
+    assert list(e.runtime_data.data.bills) == ["000012345678"]  # later messages still read
+    assert hass_storage[f"cfe.{e.entry_id}"]["data"]["last_uid"] == 5
+
+
+async def test_google_pdf_only(hass: HomeAssistant, credentials, aioclient_mock, hass_storage, freezer, fake_pdf_text):
+    freezer.move_to("2026-09-30 12:00:00")
+    aioclient_mock.get(f"{GMAIL}/messages/m1/attachments/p1", json={"size": len(PDF), "data": b64(PDF)})
+    aioclient_mock.get(f"{GMAIL}/messages/m1", json={"id": "m1", "payload": {"mimeType": "multipart/mixed", "parts": [
+        {"partId": "1", "mimeType": "application/pdf", "filename": "Recibo CFE.pdf", "body": {"attachmentId": "p1"}}]}})
+    aioclient_mock.get(f"{GMAIL}/messages", json={"messages": [{"id": "m1", "threadId": "m1"}]})
+    e = google_entry(); e.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(e.entry_id)
+    await hass.async_block_till_done()
+    assert e.runtime_data.data.bills["000012345678"].source == "pdf"
+    assert hass.states.get(entity_ids(hass, e)["amount_due"]).state == "1128.28"
+    assert hass_storage[f"cfe.{e.entry_id}"]["data"]["gmail_ids"] == ["m1"]

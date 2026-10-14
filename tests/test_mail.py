@@ -99,7 +99,7 @@ def test_new_messages(fake_imap, bill_xml) -> None:
     assert result.uidvalidity == 7
     assert result.last_uid == 4
     assert result.seen_uids == [3, 4]
-    assert result.attachments == [(3, bill_xml)]
+    assert result.attachments == [(3, "xml", bill_xml)]
 
 
 def test_n_star_returns_last_uid(fake_imap, bill_xml) -> None:
@@ -122,7 +122,9 @@ def test_uidvalidity_reset_rescans(fake_imap, bill_xml) -> None:
 def test_gmail_search_is_narrowed(fake_imap) -> None:
     fake_imap.gmail = True
     _fetch(None, 5)
-    assert fake_imap.instances[0].searches == [(None, "UID 6:*", "X-GM-RAW", '"filename:xml"')]
+    assert fake_imap.instances[0].searches == [
+        (None, "UID 6:*", "X-GM-RAW", '"has:attachment (filename:xml OR filename:pdf)"')
+    ]
 
 
 def test_plain_search(fake_imap) -> None:
@@ -135,7 +137,7 @@ def test_poison_message_is_skipped(fake_imap, bill_xml) -> None:
     result = _fetch(7, 4)
     assert result.seen_uids == [5, 6]
     assert result.last_uid == 6
-    assert result.attachments == [(6, bill_xml)]
+    assert result.attachments == [(6, "xml", bill_xml)]
 
 
 def test_partial_progress_kept(fake_imap, bill_xml) -> None:
@@ -143,7 +145,7 @@ def test_partial_progress_kept(fake_imap, bill_xml) -> None:
     fake_imap.fail_fetch_uid = 6
     result = _fetch(7, 4)
     assert result.last_uid == 5
-    assert result.attachments == [(5, bill_xml)]
+    assert result.attachments == [(5, "xml", bill_xml)]
 
 
 def test_fetch_failure_with_nothing_processed(fake_imap, bill_xml) -> None:
@@ -164,3 +166,15 @@ def test_login_rejected_is_auth_error(fake_imap) -> None:
     fake_imap.login_error = imaplib.IMAP4.error("[AUTHENTICATIONFAILED] Invalid credentials")
     with pytest.raises(cfe_mail.MailAuthError):
         _fetch(None, 0)
+
+
+def test_pdf_and_xml_attachments(fake_imap, bill_xml) -> None:
+    msg = EmailMessage()
+    msg["Subject"] = "Recibo CFE"
+    msg.set_content("adjunto")
+    msg.add_attachment(b"%PDF-1.7", maintype="application", subtype="pdf", filename="Recibo.PDF")
+    msg.add_attachment(bill_xml, maintype="application", subtype="xml", filename="AA-1.xml")
+    msg.add_attachment(b"png", maintype="image", subtype="png", filename="logo.png")
+    fake_imap.messages = {3: msg.as_bytes()}
+    result = _fetch(None, 0)
+    assert result.attachments == [(3, "pdf", b"%PDF-1.7"), (3, "xml", bill_xml)]

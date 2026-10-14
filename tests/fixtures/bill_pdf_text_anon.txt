@@ -1,0 +1,56 @@
+CLIENTE DE PRUEBA
+CALLE PRUEBA 123
+COLONIA PRUEBA
+CIUDAD PRUEBAC.P.00000
+MUNICIPIO PRUEBA,BC
+NO. DE SERVICIO:000111222333
+RMU:00000 26-08-26 XAXX-010101 010 CFE
+CUENTA:00XX00X000000000
+LÍMITE DE PAGO:09 OCT 26
+CORTE A PARTIR:10 OCT 26
+TARIFA:1ANO. MEDIDOR:9ZZZ99
+MULTIPLICADOR:1
+NO HILOS:2
+PERIODO FACTURADO:28 AGO 26-23 SEP 26
+TOTAL A PAGAR:
+$1,128
+$1,128
+(UN MIL CIENTO VEINTIOCHO PESOS  M.N.)
+(UN MIL CIENTO VEINTIOCHO PESOS  M.N.)
+X X
+Energía (kWh)
+J
+Apoyo Gubernamental 75.29
+Fecha, hora y lugar de impresion:26/09/2026 10:00:00hrsAv.Prueba Esq.Calle PruebaCiudadPruebaBaja CaliforniaMexicoCP 00000
+00000 26-08-26 XAXX-010101 010 CFE
+00XX00X000000000Repartir
+01 000111222333 261009 000001128 5
+-1-
+174 0 174
+Básico 9 1.013 9.80
+Intermedio 4 1.175 5.68
+Excedente 5 4.028 22.38
+Suministro 35.83 0.00 0.00 35.83
+Distribución 0.00 0.00 145.15 145.15
+Transmisión 0.00 0.00 31.34 31.34
+CENACE 0.00 0.00 1.32 1.32
+Energía 0.00 0.00 101.62 101.62
+Capacidad 0.00 0.00 77.08 77.08
+SCnMEM(1) 0.00 0.00 1.20 1.20
+Energía 318.24
+IVA  8% 25.46
+Fac. del Periodo 343.70
+Deposito 679.00
+DSAP 105.58
+Total 1,128.28
+Datos Fiscales del Receptor     Cadena Original     Este documento es una representación impresa de un CFDI PPD
+RFC: XAXX010101000 Razón Social:  Régimen Fiscal: 000 Uso CFDI:  CP: 00000 AC Folio: 000012345678 Folio Fiscal: UUID N. Certificado del SAT:  No. certificado del CSD:  Fecha y hora de certificación:  
+Unidad de medida: kWh
+||1.0|UUID||||||
+No te dejes engañar. Ningún trabajador de CFE puede solicitarte dinero. Repórtalo al 071 o al correo conectada.contigo@cfe.mx
+Tu comprobante fiscal es emitido por Comisión Federal de Electricidad con el RFC CFE 370814QI0.
+Cada vez que apagas una luz o un equipo que no utilizas, enciendes el camino hacia un futuro sostenible. ¡Ahorrar energía es
+bienestar!
+Corte a partir del 10 OCT 26.
+-2-
+

@@ -42,7 +42,7 @@ class FakeGmail:
                 return err
             return err, None
         if path == "messages":
-            assert params["q"] == "has:attachment filename:xml"
+            assert params["q"] == "has:attachment (filename:xml OR filename:pdf)"
             start = int(params.get("pageToken", 0))
             page = self.order[start : start + self.page_size]
             body = {"messages": [{"id": i, "threadId": i} for i in page]}
@@ -94,10 +94,12 @@ def test_new_messages(fake, bill_xml) -> None:
         xml_part("a2", " OTHER.XML "),
     ]}])
     fake.attachments[("m2", "a2")] = b"<other/>"
+    fake.attachments[("m2", "p")] = b"%PDF-1.4"
     result = fetch(fake, [])
     assert result.processed_ids == ["m1", "m2"]  # oldest first
-    assert result.attachments == [("m1", bill_xml), ("m2", b"<other/>")]
-    assert downloads(fake) == [f"{API}/messages/m1/attachments/a1", f"{API}/messages/m2/attachments/a2"]
+    assert result.attachments == [("m1", "xml", bill_xml), ("m2", "pdf", b"%PDF-1.4"), ("m2", "xml", b"<other/>")]
+    assert downloads(fake) == [f"{API}/messages/m1/attachments/a1", f"{API}/messages/m2/attachments/p",
+                               f"{API}/messages/m2/attachments/a2"]
 
 
 def test_known_ids_not_fetched(fake, bill_xml) -> None:
@@ -111,7 +113,7 @@ def test_known_ids_not_fetched(fake, bill_xml) -> None:
 def test_inline_data_and_padding(fake) -> None:
     fake.add("m1", [{"filename": "a.xml", "body": {"data": b64(b"<x/>12")}}])
     result = fetch(fake, [])
-    assert result.attachments == [("m1", b"<x/>12")]
+    assert result.attachments == [("m1", "xml", b"<x/>12")]
     assert downloads(fake) == []
 
 
@@ -179,7 +181,7 @@ def test_unreadable_message_is_recorded(fake, bill_xml, path, failure) -> None:
     fake.fail[path] = failure
     result = fetch(fake, [])
     assert result.processed_ids == ["m1", "m2"]
-    assert result.attachments == [("m2", bill_xml)]
+    assert result.attachments == [("m2", "xml", bill_xml)]
     assert not result.more
 
 
@@ -224,7 +226,7 @@ def test_partial_progress_kept(fake, bill_xml) -> None:
     fake.fail["messages/m2/attachments/a2"] = 500
     result = fetch(fake, [])
     assert result.processed_ids == ["m1"]
-    assert result.attachments == [("m1", bill_xml)]
+    assert result.attachments == [("m1", "xml", bill_xml)]
     assert result.more
 
 
@@ -239,3 +241,12 @@ def test_undecodable_attachment_skipped(fake) -> None:
     fake.add("m1", [{"filename": "a.xml", "body": {"data": "@@@="}}])
     result = fetch(fake, [])
     assert result.processed_ids == ["m1"] and result.attachments == []
+
+
+def test_pdf_only_message(fake) -> None:
+    fake.add("m1", [{"mimeType": "application/pdf", "filename": "Recibo.PDF", "body": {"attachmentId": "p1"}},
+                    {"mimeType": "image/png", "filename": "logo.png", "body": {"attachmentId": "i1"}}])
+    fake.attachments[("m1", "p1")] = b"%PDF-1.7"
+    result = fetch(fake, [])
+    assert result.attachments == [("m1", "pdf", b"%PDF-1.7")]
+    assert downloads(fake) == [f"{API}/messages/m1/attachments/p1"]
