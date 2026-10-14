@@ -1,6 +1,6 @@
 [project]
 name = "ha-cfe"
-version = "0.3.1"
+version = "0.3.2"
 description = "Home Assistant integration for CFE bills received by email (CFDI XML or PDF)"
 requires-python = ">=3.13"
 license = "MIT"
