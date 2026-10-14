@@ -9,5 +9,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/cunningplay/ha-cfe/issues",
   "requirements": ["pypdf>=6.0.0", "fonttools>=4.50.0"],
-  "version": "0.3.2"
+  "version": "0.3.3"
 }
