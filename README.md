@@ -156,7 +156,7 @@ bill a baseline. If two bills share a period end, the latest issued one counts.
 
 ## Polling and refresh
 
-The mailbox is checked every 6 hours (change it under the integration's
+The mailbox is checked once a day (change it under the integration's
 **Configure**). Call `cfe.refresh` to check now; it fails with an error if the
 check failed before any message was read. If it fails part way, the messages
 read so far are kept (a warning is logged) and the rest are read at the next

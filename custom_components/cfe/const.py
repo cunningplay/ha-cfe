@@ -16,7 +16,7 @@ CONF_SCAN_INTERVAL = "scan_interval"  # hours
 DEFAULT_HOST = "imap.gmail.com"
 DEFAULT_PORT = 993
 DEFAULT_FOLDER = "INBOX"
-DEFAULT_SCAN_INTERVAL = 6  # hours
+DEFAULT_SCAN_INTERVAL = 24  # hours (bills are bimonthly; Jeremy 2026-10-13)
 MIN_SCAN_INTERVAL = 1
 MAX_SCAN_INTERVAL = 168
 
