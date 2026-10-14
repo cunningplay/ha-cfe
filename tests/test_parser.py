@@ -162,3 +162,13 @@ def test_mail_finds_forwarded_xml_attachment(bill_xml: bytes) -> None:
     outer.add_attachment(inner)
     found = cfe_mail._xml_attachments(outer.as_bytes())
     assert found == [bill_xml]
+
+
+def test_non_finite_numbers_give_none(bill_xml: bytes) -> None:
+    bill = parse_bill(
+        bill_xml.replace(b"<Dias>26</Dias>", b"<Dias>nan</Dias>").replace(
+            b"<CONSUMO_R>174</CONSUMO_R>", b"<CONSUMO_R>inf</CONSUMO_R>"
+        )
+    )
+    assert bill.days is None
+    assert bill.kwh is None

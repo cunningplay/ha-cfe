@@ -68,7 +68,7 @@ One device, `CFE <RPU>`, with:
 | Period start / end | Billing period |
 | Bill date | Date the invoice was issued |
 | Energy | kWh for the period. Attributes: days, tiers, history |
-| Daily energy | Average kWh per day |
+| Daily energy | Average kWh per day (kWh/d) |
 | Daily cost | Average cost per day (MXN) |
 | Meter reading | Current meter reading (total increasing). Attributes: meter id, previous reading |
 | Tariff | e.g. `1A`. Attributes: summer season months |
@@ -78,33 +78,52 @@ One device, `CFE <RPU>`, with:
 | Mark paid (button) | Marks the latest bill as paid |
 
 The paid flag is local: CFE emails carry no payment information. On the very
-first import, bills whose due date has already passed are marked paid (on a new
-service an unpaid overdue bill would mean the power had been cut).
+first import, bills whose cut-off date (or, if missing, due date or period end)
+has already passed are marked paid (on a new service an unpaid bill past its
+cut-off would mean the power had been cut). Later bills are never auto-marked.
 
 ## Long-term statistics
 
 Each bill adds one point at its period end to two external statistics:
 
-- `cfe:<rpu>_energy` (kWh)
-- `cfe:<rpu>_cost` (MXN)
+- `cfe:<rpu>_energy` (kWh): the energy billed for the period (`CONSUMO_R`).
+- `cfe:<rpu>_cost` (MXN): the period charge, i.e. the CFDI invoice `Total`
+  (energy + IVA + DAP). It is not the amount due, which can include one-off
+  items such as the deposit on a new service.
 
 Both have a running sum, so they can be used in the Energy dashboard or a
-statistics graph.
+statistics graph. A zero point at the first bill's period start gives the first
+bill a baseline. If two bills share a period end, the latest issued one counts.
 
 ## Polling and refresh
 
 The mailbox is checked every 6 hours (change it under the integration's
 **Configure**). Only messages newer than the last seen UID are fetched
-(the folder's UIDVALIDITY is tracked). Call `cfe.refresh` to check now.
+(the folder's UIDVALIDITY is tracked); on Gmail the search is narrowed to
+messages with an `.xml` attachment. Call `cfe.refresh` to check now; it fails with an error if the mailbox cannot be read.
 
 If the login is rejected, Home Assistant asks for a new app password (reauth).
 Any other mail error is retried at the next poll while the stored data stays
 visible.
 
+## Privacy
+
+- A Gmail app password grants full access to that mailbox. Use a dedicated
+  mailbox for the bills (or forward them to one), not your personal account.
+- Parsed bills, including the customer name and address from the XML, are kept in
+  `.storage/cfe.<entry_id>` in the Home Assistant config folder. The file is
+  deleted when the integration entry is removed.
+- The password is never logged.
+
 ## Development
 
 ```sh
+# Parser and IMAP client (no Home Assistant needed)
 uvx --with pytest pytest -q tests
+
+# Home Assistant integration tests (config flow, polling, Store, statistics)
+uvx -p 3.14 --with pytest-homeassistant-custom-component==0.13.372 \
+  pytest -q tests_ha -o asyncio_mode=auto
 ```
 
 The parser (`custom_components/cfe/parser.py`) has no Home Assistant imports and

@@ -168,12 +168,13 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
                 continue
             self._state.bills[bill.folio] = bill
             added.append(bill)
-            # First import: anything already past its due date was paid
-            # (an unpaid overdue bill on a new service means the power is cut).
+            # First import: anything already past its cut-off was paid (an
+            # unpaid bill past cut-off on a new service means the power is cut).
+            deadline = bill.cutoff_date or bill.due_date or bill.period_end
             if (
                 not self._initial_import_done
-                and bill.due_date is not None
-                and bill.due_date < today
+                and deadline is not None
+                and deadline < today
             ):
                 self._state.paid.setdefault(bill.folio, True)
 
@@ -200,27 +201,42 @@ class CfeCoordinator(DataUpdateCoordinator[CfeData]):
         self.async_set_updated_data(self._snapshot())
 
     def _async_import_statistics(self) -> None:
-        """Write one cumulative point per bill, at its period end."""
-        bills = sorted(
-            (b for b in self._state.bills.values() if b.period_end is not None),
-            key=_sort_key,
-        )
+        """Write one cumulative point per bill, at its period end.
+
+        A zero point (sum unchanged, state 0) at the earliest bill's period
+        start gives the first bill a baseline. Bills sharing a period end keep
+        the latest issued one (as the sensors do). Cost is the period charge
+        (CFDI Total), not the amount due, which can include one-off deposits.
+        """
+        tz = dt_util.get_default_time_zone()
+        by_end: dict[date, Bill] = {}
+        for bill in sorted(self._state.bills.values(), key=_sort_key):
+            if bill.period_end is not None:
+                by_end[bill.period_end] = bill  # later-issued wins
+        bills = [by_end[end] for end in sorted(by_end)]
         energy: list[StatisticData] = []
         cost: list[StatisticData] = []
         energy_sum = 0.0
         cost_sum = 0.0
-        tz = dt_util.get_default_time_zone()
-        last_start: datetime | None = None
+        first = bills[0] if bills else None
+        if (
+            first is not None
+            and first.period_start is not None
+            and first.period_start < first.period_end
+        ):
+            start = datetime.combine(first.period_start, time(0), tzinfo=tz)
+            energy.append(StatisticData(start=start, state=0.0, sum=energy_sum))
+            cost.append(StatisticData(start=start, state=0.0, sum=cost_sum))
         for bill in bills:
             assert bill.period_end is not None
             start = datetime.combine(bill.period_end, time(0), tzinfo=tz)
-            if start == last_start:
-                continue  # one point per hour slot
-            last_start = start
+            period_cost = (
+                bill.invoice_total if bill.invoice_total is not None else bill.total
+            )
             energy_sum += bill.kwh or 0.0
-            cost_sum += bill.total or 0.0
+            cost_sum += period_cost or 0.0
             energy.append(StatisticData(start=start, state=bill.kwh, sum=energy_sum))
-            cost.append(StatisticData(start=start, state=bill.total, sum=cost_sum))
+            cost.append(StatisticData(start=start, state=period_cost, sum=cost_sum))
         if not energy:
             return
         title = f"CFE {self.rpu}"

@@ -86,8 +86,7 @@ SENSORS: tuple[CfeSensorDescription, ...] = (
     CfeSensorDescription(
         key="daily_energy",
         translation_key="daily_energy",
-        device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        native_unit_of_measurement="kWh/d",
         suggested_display_precision=2,
         value_fn=lambda b: b.daily_kwh,
     ),

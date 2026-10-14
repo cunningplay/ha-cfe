@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
-from .const import DOMAIN, SERVICE_REFRESH
+from .const import DOMAIN, SERVICE_REFRESH, STORAGE_VERSION
 from .coordinator import CfeConfigEntry, CfeCoordinator
 
 PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SENSOR]
@@ -20,9 +22,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the cfe.refresh service."""
 
     async def _refresh(call: ServiceCall) -> None:
+        failed = []
         for entry in hass.config_entries.async_entries(DOMAIN):
             if entry.state is ConfigEntryState.LOADED:
-                await entry.runtime_data.async_refresh()
+                coordinator = entry.runtime_data
+                await coordinator.async_refresh()
+                if not coordinator.last_update_success:
+                    failed.append(f"{entry.title}: {coordinator.last_exception}")
+        if failed:
+            raise HomeAssistantError(
+                "CFE mailbox check failed (stored bills kept): " + "; ".join(failed)
+            )
 
     hass.services.async_register(DOMAIN, SERVICE_REFRESH, _refresh)
     return True
@@ -48,3 +58,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: CfeConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: CfeConfigEntry) -> bool:
     """Unload a config entry."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Delete the stored bills (they contain the customer's name and address)."""
+    await Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}").async_remove()

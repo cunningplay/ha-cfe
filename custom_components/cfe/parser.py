@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
+import math
 import re
 from typing import Any
 import xml.etree.ElementTree as ET
@@ -165,9 +166,10 @@ def _float(value: str | None) -> float | None:
     if not value:
         return None
     try:
-        return float(value)
+        number = float(value)
     except ValueError:
         return None
+    return number if math.isfinite(number) else None
 
 
 def _int(value: str | None) -> int | None:
