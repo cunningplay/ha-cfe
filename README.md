@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/cunningplay/ha-cfe/main/custom_components/cfe/brand/icon.png" alt="CFE" width="120"></p>
+
 # Recibos CFE para Home Assistant
 
 **Español** · [English](#cfe-bills-for-home-assistant)
