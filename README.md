@@ -360,10 +360,13 @@ Tip: in Gmail, a filter on `from:cfe.mx has:attachment` can label the bills
 
 ## Install (HACS)
 
-1. HACS → Integrations → ⋮ → Custom repositories → add this repository as an
-   *Integration*.
-2. Install **CFE**, then restart Home Assistant.
-3. Settings → Devices & services → Add integration → **CFE**.
+[![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=cunningplay&repository=ha-cfe&category=integration)
+
+1. In HACS, search for **CFE** and download it, then restart Home Assistant.
+2. Settings → Devices & services → Add integration → **CFE**.
+
+Older HACS versions that don't list it yet: HACS → ⋮ → Custom repositories → add
+`https://github.com/cunningplay/ha-cfe` as an *Integration*, then follow the steps above.
 
 Manual install: copy `custom_components/cfe` into your `config/custom_components/`.
 
